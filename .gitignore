@@ -1,0 +1,45 @@
+# Python
+backend/.venv/
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# Build outputs
+dist/
+build/
+*.spec
+
+# Logs / generated dumps
+logs/
+tools/out/
+*.log
+
+# Local/runtime data
+config/user_config.json
+projects/*.autosave_*.pilenum.json
+autosaves/
+data/images/
+
+# Backup files from previous patches
+*.v*_backup_*
+*.backup*
+*.bak
+*.tmp
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+projects/*.pilenum.json
+!projects/.gitkeep
