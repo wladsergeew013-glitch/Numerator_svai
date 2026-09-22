@@ -1,6 +1,14 @@
 import { LocalProjectInfo, NumberingSettings, PileGroup, PilePoint, PileProject } from '../types/project';
+import type { ClusterOptions, ClusterPreview } from '../types/clustering';
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
+
+export async function previewAutoClusters(points: PilePoint[], options: ClusterOptions, signal?: AbortSignal): Promise<ClusterPreview> {
+  return request('/api/clustering/preview', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ points, options }), signal
+  });
+}
 
 function formatApiError(status: number, text: string): string {
   if (!text) return `HTTP ${status}`;
@@ -201,6 +209,7 @@ export interface NanoCadBlockSummary {
 
 export interface NanoCadBlocksScanResponse {
   connected: boolean;
+  scope?: 'selection' | 'all';
   documentName?: string | null;
   blocks: NanoCadBlockSummary[];
 }
@@ -213,26 +222,93 @@ export interface NanoCadPickBlockResponse {
   numberAttributeCandidates: string[];
 }
 
-export async function scanNanoCadBlocks(): Promise<NanoCadBlocksScanResponse> {
-  return request<NanoCadBlocksScanResponse>('/api/nanocad/blocks/scan');
+export interface CadProgress {
+  id?: string;
+  kind?: string;
+  status: 'running' | 'completed' | 'failed';
+  phase: string;
+  completed: number;
+  total: number | null;
+  startedAt?: number;
+  finishedAt?: number;
+  elapsedSeconds?: number;
+  clientElapsedSeconds?: number;
+  clientLog?: string[];
+  updated?: number;
+  failed?: number;
+}
+
+export interface CadOperationLog {
+  id: string;
+  kind: string;
+  entries: Array<{ timestamp: number; elapsedSeconds: number; event: string; level: string; details: string }>;
+  droppedEntries: number;
+}
+
+export const getCadOperationLog = (id: string) => request<CadOperationLog>(`/api/nanocad/operations/${encodeURIComponent(id)}/logs`);
+
+let cadBusy = false;
+async function cadRequest<T>(kind: string, payload: unknown = {}): Promise<T> {
+  if (cadBusy) throw new Error('Дождитесь завершения текущей операции nanoCAD.');
+  cadBusy = true;
+  const started = performance.now();
+  const clientLog = [`${new Date().toISOString()} Запуск ${kind}`];
+  const publish = (state: CadProgress) => window.dispatchEvent(new CustomEvent('cad-progress', { detail: {
+    ...state, kind, clientElapsedSeconds: (performance.now() - started) / 1000, clientLog: [...clientLog],
+  } }));
+  let last: CadProgress = { status: 'running', phase: 'Подключение к nanoCAD', completed: 0, total: null, startedAt: Date.now() / 1000 };
+  publish(last);
+  try {
+    const job = await request<{ id: string }>('/api/nanocad/operations', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, payload })
+    });
+    last = { ...last, id: job.id };
+    publish(last);
+    let errors = 0;
+    while (true) {
+      await new Promise((resolve) => window.setTimeout(resolve, 400));
+      let state: CadProgress & { result?: T; error?: unknown };
+      try {
+        state = await request(`/api/nanocad/operations/${job.id}`);
+        errors = 0;
+      } catch (error) {
+        errors += 1;
+        clientLog.push(`${new Date().toISOString()} Ошибка получения статуса (${errors}/5): ${String(error)}`);
+        if (clientLog.length > 100) clientLog.splice(1, 1);
+        if (errors < 5) continue;
+        throw new Error(`Не удалось получить состояние операции ${job.id}. Она могла продолжиться в nanoCAD. Проверьте logs/backend.log перед повтором. ${String(error)}`);
+      }
+      last = state;
+      publish(state);
+      if (state.status === 'failed') throw new Error(typeof state.error === 'string' ? state.error : JSON.stringify(state.error));
+      if (state.status === 'completed') return state.result as T;
+    }
+  } catch (error) {
+    clientLog.push(`${new Date().toISOString()} ${String(error)}`);
+    publish({ ...last, status: 'failed', phase: error instanceof Error ? error.message : String(error) });
+    throw error;
+  } finally {
+    cadBusy = false;
+  }
+}
+
+export async function scanNanoCadBlocks(scope: string = 'auto'): Promise<NanoCadBlocksScanResponse> {
+  return cadRequest<NanoCadBlocksScanResponse>('blocks/scan', { scope });
 }
 
 export async function pickNanoCadBlockSample(): Promise<NanoCadPickBlockResponse> {
-  return request<NanoCadPickBlockResponse>('/api/nanocad/blocks/pick', { method: 'POST' });
+  return cadRequest<NanoCadPickBlockResponse>('blocks/pick');
 }
 
 export async function importNanoCadBlocks(params: {
+  scope?: string;
   blockName: string;
   numberAttribute?: string | null;
   baseX?: number;
   baseY?: number;
   tolerance?: number;
 }): Promise<PilePoint[]> {
-  const data = await request<{ points: PilePoint[]; count: number }>('/api/nanocad/blocks/import', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params)
-  });
+  const data = await cadRequest<{ points: PilePoint[]; count: number }>('blocks/import', params);
   return data.points;
 }
 
@@ -248,22 +324,24 @@ export interface NanoCadBlockExportResult {
   unmatchedBlocks?: Array<{ x: number; y: number }>;
   unmatchedObjects?: Array<{ objectName?: string; x: number; y: number }>;
   skippedNoCoordinates?: number;
+  failedWrites?: number;
+  unresolvedHandles?: number;
+  logFile?: string;
+  saved?: boolean;
+  saveError?: string | null;
 }
 
 export async function exportNanoCadBlocks(params: {
+  scope?: string;
   blockName: string;
   numberAttribute: string;
-  points: Array<{ id?: string | null; x: number; y: number; number?: number | string | null; sourceNumber?: number | string | null; groupId?: string | null }>;
+  points: Array<{ id?: string | null; x: number; y: number; number?: number | string | null; sourceNumber?: number | string | null; groupId?: string | null; meta?: Record<string, unknown> }>;
   baseX?: number;
   baseY?: number;
   tolerance?: number;
   selectedGroupIds?: string[] | null;
 }): Promise<NanoCadBlockExportResult> {
-  return request<NanoCadBlockExportResult>('/api/nanocad/blocks/export', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params)
-  });
+  return cadRequest<NanoCadBlockExportResult>('blocks/export', params);
 }
 
 export interface NanoCadModelStudioParameterSummary {
@@ -287,15 +365,18 @@ export interface NanoCadModelStudioObjectSummary {
 
 export interface NanoCadModelStudioScanResponse {
   connected: boolean;
+  scope?: 'selection' | 'all';
   documentName?: string | null;
   objects: NanoCadModelStudioObjectSummary[];
 }
 
-export async function scanNanoCadModelStudioObjects(): Promise<NanoCadModelStudioScanResponse> {
-  return request<NanoCadModelStudioScanResponse>('/api/nanocad/modelstudio/scan');
+export async function scanNanoCadModelStudioObjects(scope: string = 'auto'): Promise<NanoCadModelStudioScanResponse> {
+  return cadRequest<NanoCadModelStudioScanResponse>('modelstudio/scan', { scope });
 }
 
 export async function importNanoCadModelStudioObjects(params: {
+  scope?: string;
+  preserveHandles?: boolean;
   objectName?: string | null;
   selectedObjectNames?: string[] | null;
   selectedObjectParameters?: Record<string, string> | null;
@@ -304,28 +385,23 @@ export async function importNanoCadModelStudioObjects(params: {
   baseY?: number;
   tolerance?: number;
 }): Promise<PilePoint[]> {
-  const data = await request<{ points: PilePoint[]; count: number }>('/api/nanocad/modelstudio/import', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params)
-  });
+  const data = await cadRequest<{ points: PilePoint[]; count: number }>('modelstudio/import', params);
   return data.points;
 }
 
 export async function exportNanoCadModelStudioObjects(params: {
+  saveDrawing?: boolean;
+  scope?: string;
+  matchMode?: 'auto' | 'coordinates' | 'handles';
   objectName?: string | null;
   selectedObjectNames?: string[] | null;
   numberParameter: string;
-  points: Array<{ id?: string | null; x: number; y: number; number?: number | string | null; sourceNumber?: number | string | null; groupId?: string | null }>;
+  points: Array<{ id?: string | null; x: number; y: number; number?: number | string | null; sourceNumber?: number | string | null; groupId?: string | null; meta?: Record<string, unknown> }>;
   baseX?: number;
   baseY?: number;
   tolerance?: number;
   selectedGroupIds?: string[] | null;
 }): Promise<NanoCadBlockExportResult> {
-  return request<NanoCadBlockExportResult>('/api/nanocad/modelstudio/export', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params)
-  });
+  return cadRequest<NanoCadBlockExportResult>('modelstudio/export', params);
 }
 

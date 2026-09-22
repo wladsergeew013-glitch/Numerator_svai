@@ -34,7 +34,7 @@ def _nearest_step(points: list[PilePoint]) -> float:
                 best = d
         if isfinite(best):
             nearest.append(best)
-    return max(1.0, median(nearest) if nearest else 1000.0)
+    return max(1e-9, median(nearest) if nearest else 1.0)
 
 
 def _bounds(points: list[PilePoint]) -> tuple[float, float, float, float]:
@@ -58,8 +58,8 @@ def _connected_clusters_raw(points: list[PilePoint], nearest_step: float) -> lis
     xs = [p.x for p in points]
     ys = [p.y for p in points]
     span = max(max(xs) - min(xs), max(ys) - min(ys), nearest_step)
-    soft_limit = max(nearest_step * 3.2, span * 0.035, 1200.0)
-    neighbor_limit = min(max(soft_limit, nearest_step * 2.4), max(nearest_step * 5.5, 2500.0))
+    soft_limit = max(nearest_step * 3.2, span * 0.035)
+    neighbor_limit = min(max(soft_limit, nearest_step * 2.4), nearest_step * 5.5)
 
     neighbors: dict[str, set[str]] = {p.id: set() for p in points}
     for point in points:
@@ -107,11 +107,21 @@ def _axis_buckets(points: list[PilePoint], axis: str, tolerance: float) -> list[
     return buckets
 
 
+def _split_axis_gaps(points: list[PilePoint], axis: str, max_gap: float) -> list[list[PilePoint]]:
+    runs: list[list[PilePoint]] = []
+    for point in sorted(points, key=lambda p: getattr(p, axis)):
+        if not runs or getattr(point, axis) - getattr(runs[-1][-1], axis) > max_gap:
+            runs.append([point])
+        else:
+            runs[-1].append(point)
+    return runs
+
+
 def _dense_horizontal_bands(points: list[PilePoint], nearest_step: float) -> list[list[PilePoint]]:
-    tolerance = max(500.0, nearest_step * 0.65)
+    tolerance = nearest_step * 0.65
     min_dense_count = max(6, int((len(points) ** 0.5) * 1.25))
     raw: list[list[PilePoint]] = []
-    for bucket in _axis_buckets(points, "y", tolerance):
+    for bucket in [run for band in _axis_buckets(points, "y", tolerance) for run in _split_axis_gaps(band, "x", nearest_step * 5.5)]:
         min_x, max_x, _min_y, _max_y = _bounds(bucket)
         if len(bucket) >= min_dense_count and max_x - min_x >= nearest_step * 6:
             raw.append(bucket)
@@ -189,9 +199,9 @@ def _merge_clusters_by_horizontal_bands(clusters: list[list[PilePoint]], all_poi
 
 
 def _vertical_tail_bands(points: list[PilePoint], nearest_step: float) -> list[list[PilePoint]]:
-    tolerance = max(500.0, nearest_step * 0.65)
+    tolerance = nearest_step * 0.65
     raw: list[list[PilePoint]] = []
-    for bucket in _axis_buckets(points, "x", tolerance):
+    for bucket in [run for band in _axis_buckets(points, "x", tolerance) for run in _split_axis_gaps(band, "y", nearest_step * 5.5)]:
         _min_x, _max_x, min_y, max_y = _bounds(bucket)
         if len(bucket) >= 6 and max_y - min_y >= nearest_step * 6:
             raw.append(bucket)
@@ -249,8 +259,16 @@ def _split_right_vertical_tail(cluster: list[PilePoint], nearest_step: float) ->
 
 
 def _connected_clusters(points: list[PilePoint]) -> list[list[PilePoint]]:
+    # Equal-distance neighbours must not depend on import/enumeration order.
+    points = sorted(points, key=lambda p: (p.x, p.y, p.id))
     nearest_step = _nearest_step(points)
-    clusters = _connected_clusters_raw(points, nearest_step)
+    second_steps = []
+    for point in points:
+        distances = sorted(_dist(point, other) for other in points if other.id != point.id and _dist(point, other) > 1e-9)
+        if distances:
+            second_steps.append(distances[min(1, len(distances) - 1)])
+    connection_step = max(nearest_step, median(second_steps) if second_steps else nearest_step)
+    clusters = _connected_clusters_raw(points, connection_step)
     clusters = _merge_clusters_by_horizontal_bands(clusters, points, nearest_step)
 
     refined: list[list[PilePoint]] = []
@@ -306,7 +324,7 @@ def _axis_score(points: list[PilePoint], axis: str, tolerance: float) -> float:
 
 def _choose_settings(points: list[PilePoint], order: int, pipeline_start: int) -> NumberingSettings:
     step = _nearest_step(points)
-    tolerance = max(120.0, min(1500.0, step * 0.35))
+    tolerance = step * 0.35
     rows_score = _axis_score(points, "y", tolerance)
     columns_score = _axis_score(points, "x", tolerance)
     if rows_score >= columns_score * 1.12:

@@ -1,7 +1,8 @@
+import { cadAxisPlacement } from '../utils/cadAxes';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Circle, Group, Layer, Line, Rect, Stage, Text } from 'react-konva';
+import { Arrow, Circle, Group, Layer, Line, Rect, Stage, Text } from 'react-konva';
 import { KonvaEventObject } from 'konva/lib/Node';
-import { useProjectStore } from '../store/useProjectStore';
+import { buildPreviewOrderForGroup, buildGroupFlow, buildNumberingOrder, useProjectStore } from '../store/useProjectStore';
 
 interface Props {
   width: number;
@@ -1263,11 +1264,12 @@ function manualLinkKey(fromId: string, toId: string) {
 
 export function CanvasView({ width, height, onPointerUpdate }: Props) {
   const stageRef = useRef<any>(null);
+  const lastMiddlePress = useRef<{ time: number; x: number; y: number } | null>(null);
   const canvasWrapRef = useRef<HTMLDivElement | null>(null);
   const {
     project,
     selectedPointIds,
-    selectedGroupId,
+    selectedGroupId, allGroupsOrderVisible,
     autoAssignSelection,
     pointInfoVisible,
     editPointPickMode,
@@ -1588,19 +1590,46 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     .filter((p) => rectContains(rect, worldToScreen(p.x, p.y)))
     .map((p) => p.id);
 
-  const activeNumberingGroup = project.groups.find((g) => g.id === selectedGroupId) ?? project.groups[0] ?? null;
+  const groupById = useMemo(() => new Map(project.groups.map(g => [g.id, g])), [project.groups]);
+  const pointById = useMemo(() => new Map(project.points.map(p => [p.id, p])), [project.points]);
+  const selectedIds = useMemo(() => new Set(selectedPointIds), [selectedPointIds]);
+  const groupLabels = useMemo(() => {
+    if (!project.viewSettings.showGroupNumbers) return [];
+    const centers = new Map<string, { x: number; y: number; count: number }>();
+    for (const p of project.points) {
+      if (!p.groupId) continue;
+      const c = centers.get(p.groupId) ?? { x: 0, y: 0, count: 0 };
+      c.x += p.x; c.y += p.y; c.count++; centers.set(p.groupId, c);
+    }
+    return project.groups.filter(g => g.visible !== false && centers.has(g.id)).map(g => {
+      const c = centers.get(g.id)!;
+      const pipeline = project.pipelines.find(p => p.id === g.pipelineId);
+      return { id: g.id, x: c.x / c.count, y: c.y / c.count, color: g.color,
+        text: `${project.pipelines.length > 1 ? `П.${pipeline?.order ?? 1} · ` : ''}Гр. ${g.order}` };
+    });
+  }, [project.points, project.groups, project.pipelines, project.viewSettings.showGroupNumbers]);
+  const activeNumberingGroup = groupById.get(selectedGroupId ?? '') ?? project.groups[0] ?? null;
   const numberingStartPointId = activeNumberingGroup?.numbering.startPointId ?? null;
   const numberingEndPointId = activeNumberingGroup?.numbering.endPointId ?? null;
+  const allGroupRoutes = useMemo(() => {
+    if (!allGroupsOrderVisible) return [];
+    return project.groups.filter(group => group.visible !== false).map(group => ({
+      id: group.id, color: group.color, points: buildPreviewOrderForGroup(project, group).route
+    }));
+  }, [allGroupsOrderVisible, project.points, project.groups, project.pipelines, project.numberingMode]);
+  const groupFlow = useMemo(() => project.viewSettings.showGroupFlow === true
+    ? buildGroupFlow(project) : { endpoints: [], links: [] },
+  [project.points, project.groups, project.pipelines, project.numberingMode, project.viewSettings.showGroupFlow]);
 
-  const storedPreviewRoutePoints = numberingPreview.routePointIds
-    .map((id) => project.points.find((p) => p.id === id))
-    .filter((p): p is NonNullable<typeof p> => Boolean(p));
+  const storedPreviewRoutePoints = useMemo(() => numberingPreview.routePointIds
+    .map((id) => pointById.get(id))
+    .filter((p): p is NonNullable<typeof p> => Boolean(p)), [numberingPreview.routePointIds, pointById]);
 
   const previewPoints = numberingPreview.visible ? storedPreviewRoutePoints : [];
 
-  const activeGroupPoints = activeNumberingGroup
+  const activeGroupPoints = useMemo(() => activeNumberingGroup
     ? project.points.filter((p) => p.groupId === activeNumberingGroup.id)
-    : [];
+    : [], [project.points, activeNumberingGroup]);
 
   // v61: правка вектора работает только через режим «Редактировать».
   // v60: нарисованный вектор больше не является одноразовым draft-слоем.
@@ -1797,19 +1826,24 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     }
   }, [activeGroupPoints, activeNumberingGroup, markerFontSize, panX, panY, project.viewSettings.groupOutlineFillColor, project.viewSettings.groupOutlinePadding, project.viewSettings.groupOutlineSimplifyPx, project.viewSettings.groupOutlineSnapPx, project.viewSettings.groupOutlineStrokeColor, project.viewSettings.groupOutlineVisible, width, zoom]);
 
-  const numberedFallbackAutoPoints = [...activeGroupPoints].sort((a, b) => {
-    const an = Number(a.number);
-    const bn = Number(b.number);
-    const aHasNumber = Number.isFinite(an);
-    const bHasNumber = Number.isFinite(bn);
-    if (aHasNumber && bHasNumber && an !== bn) return an - bn;
-    if (aHasNumber !== bHasNumber) return aHasNumber ? -1 : 1;
-    return (a.x - b.x) || (b.y - a.y);
-  });
+  const numberedFallbackAutoPoints = useMemo(() => {
+    if (!activeNumberingGroup) return [];
+    if (!activeGroupPoints.some((p) => p.number != null && Number.isFinite(p.number))) {
+      return buildNumberingOrder(activeGroupPoints, activeNumberingGroup.numbering);
+    }
+    return [...activeGroupPoints].sort((a, b) => {
+      const aHasNumber = a.number != null && Number.isFinite(a.number);
+      const bHasNumber = b.number != null && Number.isFinite(b.number);
+      if (aHasNumber && bHasNumber && a.number !== b.number) return a.number! - b.number!;
+      if (aHasNumber !== bHasNumber) return aHasNumber ? -1 : 1;
+      return (a.x - b.x) || (b.y - a.y);
+    });
+  }, [activeGroupPoints, activeNumberingGroup]);
   const previewBelongsToActiveGroup = Boolean(activeNumberingGroup && numberingPreview.groupId === activeNumberingGroup.id && storedPreviewRoutePoints.length);
   const effectiveRoutePoints = previewBelongsToActiveGroup ? storedPreviewRoutePoints : numberedFallbackAutoPoints;
-  const effectiveNumberingStartPointId = numberingStartPointId ?? effectiveRoutePoints[0]?.id ?? null;
-  const effectiveNumberingEndPointId = numberingEndPointId ?? effectiveRoutePoints[effectiveRoutePoints.length - 1]?.id ?? null;
+  const activeFlowEndpoints = groupFlow.endpoints.find(entry => entry.groupId === activeNumberingGroup?.id);
+  const effectiveNumberingStartPointId = activeFlowEndpoints?.start.id ?? numberingStartPointId ?? effectiveRoutePoints[0]?.id ?? null;
+  const effectiveNumberingEndPointId = activeFlowEndpoints?.end.id ?? numberingEndPointId ?? effectiveRoutePoints[effectiveRoutePoints.length - 1]?.id ?? null;
 
   const previewRouteIndexById = useMemo(() => {
     const map = new Map<string, number>();
@@ -1964,6 +1998,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     const pos = pointer();
     if (!pos) return;
 
+
     if (groupOutlineDrawMode) {
       if (e.evt.button === 1 || e.evt.button === 2) {
         setPanStart({ pointer: pos, panX, panY });
@@ -2084,6 +2119,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     }
 
     if (panStart) {
+      if (Math.hypot(pos.x - panStart.pointer.x, pos.y - panStart.pointer.y) > 5) lastMiddlePress.current = null;
       updateView(zoom, panStart.panX + pos.x - panStart.pointer.x, panStart.panY + pos.y - panStart.pointer.y);
       return;
     }
@@ -2472,10 +2508,26 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     startNumberingManualLinkEdit(fromId, toId);
   };
 
+  const cadAxes = cadAxisPlacement(worldToScreen(0, 0), width, height);
+
   return (
     <div
       ref={canvasWrapRef}
       className="canvas-wrap"
+      onMouseDownCapture={event => {
+        if (event.button !== 1) return;
+        event.preventDefault();
+        const rect = event.currentTarget.getBoundingClientRect();
+        const pos = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+        const last = lastMiddlePress.current;
+        const now = performance.now();
+        if (event.detail === 2 || (last && now - last.time < 450 && Math.hypot(pos.x - last.x, pos.y - last.y) < 6)) {
+          event.stopPropagation();
+          lastMiddlePress.current = null;
+          setPanStart(null);
+          useProjectStore.getState().zoomExtents(width, height);
+        } else lastMiddlePress.current = { time: now, ...pos };
+      }}
       tabIndex={0}
       onKeyDownCapture={(event) => {
         if (!groupOutlineDrawMode && !vectorPathDrawMode && !vectorPathEditMode) return;
@@ -2516,18 +2568,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
             const strokeWidth = line.kind === 'axisX' || line.kind === 'axisY' ? 1.8 : line.kind === 'major' ? 0.7 : 0.35;
             return <Line key={idx} points={line.points} stroke={stroke} strokeWidth={strokeWidth} />;
           })}
-          {project.gridSettings.axesEnabled && (
-            <Group x={24} y={Math.max(54, height - 48)} listening={false} opacity={0.96}>
-              <Rect x={-10} y={-38} width={92} height={54} cornerRadius={10} fill="rgba(2,6,23,0.64)" stroke="rgba(148,163,184,0.35)" strokeWidth={1} />
-              <Line points={[0, 0, 55, 0]} stroke={AXIS_X_COLOR} strokeWidth={2.4} />
-              <Line points={[55, 0, 47, -4, 47, 4, 55, 0]} stroke={AXIS_X_COLOR} strokeWidth={2.4} closed />
-              <Line points={[0, 0, 0, -32]} stroke={AXIS_Y_COLOR} strokeWidth={2.4} />
-              <Line points={[0, -32, -4, -24, 4, -24, 0, -32]} stroke={AXIS_Y_COLOR} strokeWidth={2.4} closed />
-              <Circle x={0} y={0} radius={3.4} fill="#f8fafc" stroke="rgba(15,23,42,0.9)" strokeWidth={1} />
-              <Text x={61} y={-9} text="X" fill={AXIS_X_COLOR} fontSize={13} fontStyle="bold" />
-              <Text x={-5} y={-50} text="Y" fill={AXIS_Y_COLOR} fontSize={13} fontStyle="bold" />
-            </Group>
-          )}
+
         </Layer>
 
         <Layer>
@@ -3104,12 +3145,49 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
           )}
         </Layer>
 
+        {project.viewSettings.showGroupNumbers && <Layer listening={false}>
+          {groupLabels.map(label => {
+            const sp = worldToScreen(label.x, label.y);
+            if (sp.x < -100 || sp.x > width + 100 || sp.y < -100 || sp.y > height + 100) return null;
+            const w = textWidth(label.text, 13) + 14;
+            return <Group key={label.id} x={sp.x - w / 2} y={sp.y - 30}>
+              <Rect width={w} height={23} fill="#0f172a" stroke={label.color} cornerRadius={4} />
+              <Text text={label.text} x={7} y={5} fontSize={13} fill="#f8fafc" />
+            </Group>;
+          })}
+        </Layer>}
+        {allGroupsOrderVisible && <Layer listening={false}>
+          {allGroupRoutes.flatMap(route => route.points.slice(1).map((point, index) => {
+            const from = worldToScreen(route.points[index].x, route.points[index].y), to = worldToScreen(point.x, point.y);
+            return <Arrow key={`${route.id}:${point.id}`} points={[from.x, from.y, to.x, to.y]} stroke={route.color} fill={route.color} strokeWidth={1.7} pointerLength={5} pointerWidth={5} opacity={0.8} />;
+          }))}
+        </Layer>}
+        {project.viewSettings.showGroupFlow === true && <Layer listening={false}>
+          {groupFlow.links.map(link => {
+            const from = worldToScreen(link.from.x, link.from.y), to = worldToScreen(link.to.x, link.to.y);
+            const dx = to.x - from.x, dy = to.y - from.y, length = Math.hypot(dx, dy);
+            if (length < 32) return null;
+            return <Arrow key={`${link.fromGroupId}:${link.toGroupId}`} points={[
+              from.x + dx / length * 16, from.y + dy / length * 16,
+              to.x - dx / length * 12, to.y - dy / length * 12
+            ]} stroke="#94a3b8" fill="#94a3b8" strokeWidth={1.6} dash={[7, 5]} pointerLength={7} pointerWidth={6} opacity={0.85} />;
+          })}
+          {groupFlow.endpoints.map(endpoint => {
+            const start = worldToScreen(endpoint.start.x, endpoint.start.y), end = worldToScreen(endpoint.end.x, endpoint.end.y);
+            return <Group key={endpoint.groupId}>
+              <Circle x={start.x} y={start.y} radius={10} stroke="#22d3ee" strokeWidth={2.5} />
+              <Circle x={end.x} y={end.y} radius={14} stroke="#fb923c" strokeWidth={2.5} />
+            </Group>;
+          })}
+        </Layer>}
         <Layer>
           {project.points.map((p) => {
             const sp = worldToScreen(p.x, p.y);
-            const group = project.groups.find((g) => g.id === p.groupId);
+            if (sp.x < -180 || sp.x > width + 180 || sp.y < -180 || sp.y > height + 180) return null;
+            const group = groupById.get(p.groupId ?? '');
+            if (group?.visible === false) return null;
             const fill = group?.color || '#d1d5db';
-            const selected = selectedPointIds.includes(p.id);
+            const selected = selectedIds.has(p.id);
             const focusedPoint = focusedPointIds.has(p.id);
             const unnumbered = p.number == null || p.number === undefined;
             const vectorWorkMode = vectorPathDrawMode || vectorPathEditMode || Boolean(vectorExtendState);
@@ -3126,6 +3204,12 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
             const numberingEnd = effectiveNumberingEndPointId === p.id;
             const numberingStartAuto = !numberingStartPointId && numberingStart;
             const numberingEndAuto = !numberingEndPointId && numberingEnd;
+            if (project.viewSettings.highlightUnnumbered && !unnumbered && !selected && !propertySource && !copyBase && !numberingStart && !numberingEnd) {
+              return <Circle key={p.id} x={sp.x} y={sp.y} radius={3} fill={fill} opacity={0.16}
+                perfectDrawEnabled={false} hitStrokeWidth={10}
+                onMouseDown={e => onPointMouseDown(e, p.id)} onClick={e => onPointClick(e, p.id)}
+                onDblClick={e => onPointDblClick(e, p.id)} onTap={e => onPointClick(e as any, p.id)} />;
+            }
             const syncStroke = p.syncState === 'added' ? '#22c55e' : p.syncState === 'moved' ? '#eab308' : p.syncState === 'deleted' ? '#ef4444' : '#020617';
             const label = p.number != null ? String(p.number) : '';
             const fontSize = numberFontSize;
@@ -3323,7 +3407,26 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
             </Group>
           )}
         </Layer>
+        <Layer listening={false}>
+          <Group name={cadAxes.atOrigin ? 'cad-axes-at-origin' : 'cad-axes-in-corner'} listening={false}>
+            {!cadAxes.atOrigin && <Rect x={cadAxes.x - 14} y={cadAxes.y - 68} width={96} height={86} cornerRadius={8} fill="rgba(2,6,23,0.78)" stroke="rgba(148,163,184,0.3)" />}
+            <Line points={[cadAxes.x, cadAxes.y, cadAxes.x + cadAxes.xLength, cadAxes.y]} stroke={AXIS_X_COLOR} strokeWidth={2.4} />
+            {cadAxes.xLength >= 8 && <Line points={[cadAxes.x + cadAxes.xLength - 6, cadAxes.y - 4, cadAxes.x + cadAxes.xLength, cadAxes.y, cadAxes.x + cadAxes.xLength - 6, cadAxes.y + 4]} stroke={AXIS_X_COLOR} strokeWidth={2.4} />}
+            <Line points={[cadAxes.x, cadAxes.y, cadAxes.x, cadAxes.y - cadAxes.yLength]} stroke={AXIS_Y_COLOR} strokeWidth={2.4} />
+            {cadAxes.yLength >= 8 && <Line points={[cadAxes.x - 4, cadAxes.y - cadAxes.yLength + 6, cadAxes.x, cadAxes.y - cadAxes.yLength, cadAxes.x + 4, cadAxes.y - cadAxes.yLength + 6]} stroke={AXIS_Y_COLOR} strokeWidth={2.4} />}
+            <Circle x={cadAxes.x} y={cadAxes.y} radius={3.4} fill="#f8fafc" stroke="#0f172a" strokeWidth={1} />
+            <Text x={cadAxes.xLabel.x} y={cadAxes.xLabel.y} text="X" fill={AXIS_X_COLOR} stroke="#0f172a" strokeWidth={0.35} fontSize={14} fontStyle="bold" />
+            <Text x={cadAxes.yLabel.x} y={cadAxes.yLabel.y} text="Y" fill={AXIS_Y_COLOR} stroke="#0f172a" strokeWidth={0.35} fontSize={14} fontStyle="bold" />
+            {cadAxes.atOrigin && <Text x={Math.max(2, cadAxes.x - 13)} y={Math.min(height - 14, cadAxes.y + 6)} text="0" fill="#94a3b8" fontSize={11} />}
+          </Group>
+        </Layer>
       </Stage>
+      {project.viewSettings.showGroupFlow === true && <div className={`group-flow-legend${width < 360 ? ' group-flow-legend-narrow' : ''}`} role="note" aria-label="Условные обозначения связей групп">
+        <span><i className="flow-start" />Старт</span>
+        <span><i className="flow-end" />Финиш</span>
+        <span>┄→ Следующая группа</span>
+        <span>{groupFlow.endpoints.length} групп · {groupFlow.links.length} переходов</span>
+      </div>}
       {pointEditDialog && (() => {
         const point = project.points.find((p) => p.id === pointEditDialog.pointId);
         const group = point?.groupId ? project.groups.find((g) => g.id === point.groupId) : null;

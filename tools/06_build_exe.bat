@@ -162,44 +162,7 @@ if defined EXE_ICON (
 
 echo [INFO] Building desktop EXE with PyInstaller...
 >> "%LOG_FILE%" echo [INFO] Running PyInstaller.
-"%VENV_PY%" -m PyInstaller ^
-  --noconfirm ^
-  --clean ^
-  --onefile ^
-  --windowed ^
-  --name "PileNumbering" ^
-  --icon "%EXE_ICON%" ^
-  --paths "%ROOT%\backend" ^
-  --add-data "%ROOT%\frontend\dist;frontend_dist" ^
-  --collect-all webview ^
-  --collect-submodules uvicorn ^
-  --collect-submodules fastapi ^
-  --collect-submodules starlette ^
-  --collect-submodules pydantic ^
-  --collect-submodules win32com ^
-  --hidden-import app.main ^
-  --hidden-import app.schemas ^
-  --hidden-import app.io_project ^
-  --hidden-import app.numbering_rows ^
-  --hidden-import app.numbering_route ^
-  --hidden-import app.numbering_vector ^
-  --hidden-import app.numbering_manual ^
-  --hidden-import app.clustering_auto ^
-  --hidden-import app.sync_import ^
-  --hidden-import uvicorn.logging ^
-  --hidden-import uvicorn.loops.auto ^
-  --hidden-import uvicorn.protocols.http.auto ^
-  --hidden-import uvicorn.protocols.websockets.auto ^
-  --hidden-import uvicorn.lifespan.on ^
-  --hidden-import h11 ^
-  --hidden-import anyio ^
-  --hidden-import starlette.staticfiles ^
-  --hidden-import starlette.responses ^
-  --hidden-import webview.platforms.edgechromium ^
-  --hidden-import win32com.client ^
-  --hidden-import pythoncom ^
-  --hidden-import pywintypes ^
-  "%ROOT%\tools\exe_launcher.py" >> "%LOG_FILE%" 2>&1
+"%VENV_PY%" -m PyInstaller --noconfirm --distpath "%ROOT%\dist" --workpath "%ROOT%\build" "%ROOT%\tools\PileNumbering.spec" >> "%LOG_FILE%" 2>&1
 if errorlevel 1 goto fail_with_log
 
 if not exist "%ROOT%\dist\PileNumbering.exe" (

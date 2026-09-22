@@ -232,9 +232,9 @@ def check_toolbar_and_window_contract() -> None:
     require(app, "position: 'fixed'", "frontend/src/App.tsx")
     require(app, "left: dockReserve.left", "frontend/src/App.tsx")
     require(app, "right: dockReserve.right", "frontend/src/App.tsx")
-    require(app, "const MAX_DOCK_WIDTH = 920", "frontend/src/App.tsx")
-    require(app, "readDockRegistry", "frontend/src/App.tsx")
-    require(app, "loadPanelWidth", "frontend/src/App.tsx")
+    require(app, "getBoundingClientRect", "frontend/src/App.tsx")
+    require(app, "ResizeObserver", "frontend/src/App.tsx")
+    require(app, "computeDockReserve", "frontend/src/App.tsx")
     require(app, "pile-numbering-dock-layout-changed", "frontend/src/App.tsx")
     toolbar = read("frontend/src/components/Toolbar.tsx")
     require(toolbar, "about-project-dialog", "frontend/src/components/Toolbar.tsx")
@@ -247,8 +247,8 @@ def check_toolbar_and_window_contract() -> None:
         if forbidden in toolbar:
             raise AssertionError(f"About/product UI wording must be release-style, found: {forbidden}")
     for label in [
-        "Создать", "Открыть", "Проекты", "Сохранить", "Переименовать", "Переим.", "Импорт", "Экспорт",
-        "Проверка", "Скан nanoCAD для экспорта", "CSV / Excel", "nanoCAD", "Блоки", "Model Studio",
+        "Создать", "Открыть", "Проекты", "Сохранить", "Переименовать", "Имя проекта", "Импорт", "Экспорт",
+        "Проверка", "Способ поиска объектов", "CSV / Excel", "nanoCAD", "Блоки", "Model Studio",
     ]:
         require(toolbar, label, "frontend/src/components/Toolbar.tsx")
     for needle in [
@@ -379,15 +379,11 @@ def check_exe_launcher_contract() -> None:
         require(launcher, needle, "tools/exe_launcher.py")
 
     build = read("tools/06_build_exe.bat")
-    for needle in [
-        "tools\\exe_launcher.py", "--add-data", "frontend\\dist;frontend_dist",
-        "--collect-all webview", "--collect-submodules fastapi", "--collect-submodules starlette",
-        "--hidden-import win32com.client", "--hidden-import pythoncom", "--hidden-import pywintypes",
-        "--hidden-import h11", "--hidden-import anyio", "--hidden-import starlette.staticfiles",
-        "Checking backend venv portability", "VENV_BROKEN", "pyvenv.cfg",
-        "Existing backend\\.venv is broken or copied from another PC",
-    ]:
+    for needle in ["tools\\PileNumbering.spec", "Checking backend venv portability", "VENV_BROKEN", "pyvenv.cfg", "Existing backend\\.venv is broken or copied from another PC"]:
         require(build, needle, "tools/06_build_exe.bat")
+    spec = read("tools/PileNumbering.spec")
+    for needle in ["exe_launcher.py", "frontend_dist", "collect_all('webview')", "collect_submodules('fastapi')", "collect_submodules('starlette')", "win32com.client", "pythoncom", "pywintypes", "h11", "anyio", "starlette.staticfiles", "Splash(", "splash.binaries"]:
+        require(spec, needle, "tools/PileNumbering.spec")
 
     run_dev = read("tools/01_run_dev.bat")
     for needle in [

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { DraggablePanel } from './DraggablePanel';
 import { useProjectStore } from '../store/useProjectStore';
 
@@ -6,6 +6,12 @@ export function PointInfoPanel({ toolbarHeight, statusBarHeight }: { toolbarHeig
   const { project, selectedPointIds, togglePointInfo, setPointManualNumber, clearPointManualNumber, updatePointNumberLabelOffset } = useProjectStore();
   const point = project.points.find((p) => p.id === selectedPointIds[0]);
   const group = point?.groupId ? project.groups.find((g) => g.id === point.groupId) : null;
+  useEffect(() => {
+    const state = useProjectStore.getState();
+    if (group && state.selectedGroupId !== group.id) state.setSelectedGroup(group.id);
+    if (group) useProjectStore.setState({ groupManagerVisible: true, groupManagerCollapsed: false,
+      collapsedGroupIds: state.collapsedGroupIds.filter(id => id !== group.id) });
+  }, [point?.id, group?.id]);
   const [manualNumberValue, setManualNumberValue] = useState('');
 
   const locked = Boolean(point?.locked || group?.locked);

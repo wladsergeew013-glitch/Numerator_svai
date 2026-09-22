@@ -1,0 +1,37 @@
+const paths: Record<string, string> = {
+  'group-flow': 'M5 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6 M5 10v3 M7 15h3 M12 15h3 M17 15h3 M17 12l3 3-3 3 M20 18v3h-6v-6',
+  '✚': 'M14 2H5v20h14V7z M14 2v6h5 M8 14h8 M12 10v8',
+  '📂': 'M3 7V4h6l2 3h10v3 M3 7h6l2 3h11l-3 10H3z',
+  '💽': 'M4 3h14l3 3v15H3V3z M7 3v6h10V3 M7 21v-8h10v8',
+  '✎': 'M4 16 16 4l4 4L8 20H4z M14 6l4 4',
+  '🗂': 'M3 6h7l2 3h9v12H3z M5 3h7l2 3h5',
+  '➕': 'M4 15v6h16v-6 M12 3v13 M7 11l5 5 5-5',
+  '📤': 'M4 15v6h16v-6 M12 16V3 M7 8l5-5 5 5',
+  '＋': 'M12 3v18 M3 12h18 M7 7h10v10H7z',
+  '⌫': 'M4 6h16 M9 6V3h6v3 M6 6l1 15h10l1-15 M10 10v7 M14 10v7',
+  '↔': 'M12 2v20 M2 12h20 M8 6l4-4 4 4 M8 18l4 4 4-4 M6 8l-4 4 4 4 M18 8l4 4-4 4',
+  '⧉': 'M8 8h13v13H8z M16 8V3H3v13h5',
+  '🧾': 'M6 3h12v18H6z M9 7h6 M9 11h6 M9 15h4',
+  'ℹ': 'M12 10v8 M12 6v1 M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20',
+  '▤': 'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',
+  '☑': 'M3 3h18v18H3z M6 12l4 4 8-8',
+  '☐': 'M3 3h18v18H3z M6 12h12 M14 8l4 4-4 4',
+  '⛓': 'M3 18h5V6h8v12h5 M18 15l3 3-3 3 M1 16h4v4H1z',
+  '▶': 'M7 3l14 9-14 9z',
+  '⏸': 'M7 3v18 M17 3v18',
+  '🧹': 'M4 17 17 4 M13 4h4v4 M3 13l8 8 M3 21l18-18',
+  '№': 'M8 3 6 21 M15 3l-2 18 M3 9h16 M2 15h16',
+  '№№': 'M7 3 5 21 M13 3l-2 18 M2 9h14 M1 15h14 M18 7l2 2 3-4 M18 17l2 2 3-4',
+  '⛶': 'M3 9V3h6 M15 3h6v6 M21 15v6h-6 M9 21H3v-6 M8 8h8v8H8z',
+  '#': 'M3 3h18v18H3z M9 3v18 M15 3v18 M3 9h18 M3 15h18',
+  '12': 'M3 8l3-3v14 M12 7c0-5 9-5 9 0 0 4-9 5-9 12h9',
+  '○!': 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20 M12 6v7 M12 17v1',
+  '✓': 'M3 12l6 6L21 6',
+  '⚙': 'M4 6h16 M4 12h16 M4 18h16 M8 3v6 M16 9v6 M10 15v6',
+  '↶': 'M8 4 3 9l5 5 M3 9h11a7 7 0 0 1 0 14',
+  '↷': 'M16 4l5 5-5 5 M21 9h-11a7 7 0 0 0 0 14',
+};
+
+export function CommandIcon({ icon }: { icon: string }) {
+  return paths[icon] ? <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[icon]} /></svg> : <>{icon}</>;
+}

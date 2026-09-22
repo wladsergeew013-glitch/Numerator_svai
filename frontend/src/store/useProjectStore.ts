@@ -1,3 +1,6 @@
+import { projectSaveSignature } from '../utils/projectSaveState';
+import { newImportPoints } from '../utils/importPoints';
+import { DEFAULT_CLUSTER_OPTIONS, type ClusterApplication } from '../types/clustering';
 import { create } from 'zustand';
 import { getUserConfig, numberRows, saveUserConfig as saveUserConfigFile, type UserConfigPayload } from '../api/client';
 import {
@@ -235,7 +238,7 @@ function resolveEffectiveGroupNumberingContext(project: PileProject, targetGroup
   };
 }
 
-function buildPreviewOrderForGroup(project: PileProject, targetGroup: PileGroup) {
+export function buildPreviewOrderForGroup(project: PileProject, targetGroup: PileGroup) {
   const pipelineId = groupPipelineId(targetGroup, project);
   const groups = sortedGroupsForPipeline(project, pipelineId);
   let previousEndPoint: PilePoint | null = null;
@@ -253,6 +256,40 @@ function buildPreviewOrderForGroup(project: PileProject, targetGroup: PileGroup)
   }
 
   return { route: [] as PilePoint[], settings: targetGroup.numbering };
+}
+
+/** Read-only overview; calculate each group's route once, keeping pipelines separate. */
+export function buildGroupFlow(project: PileProject) {
+  const pointsByGroup = new Map<string, PilePoint[]>();
+  for (const point of project.points) {
+    if (!point.groupId) continue;
+    const points = pointsByGroup.get(point.groupId) ?? [];
+    points.push(point);
+    pointsByGroup.set(point.groupId, points);
+  }
+  const endpoints: Array<{ groupId: string; start: PilePoint; end: PilePoint }> = [];
+  const links: Array<{ fromGroupId: string; toGroupId: string; from: PilePoint; to: PilePoint }> = [];
+  const pipelines = new Set(project.groups.map(group => groupPipelineId(group, project)));
+  for (const pipelineId of pipelines) {
+    let previous: { group: PileGroup; end: PilePoint } | null = null;
+    for (const group of sortedGroupsForPipeline(project, pipelineId)) {
+      const points = pointsByGroup.get(group.id) ?? [];
+      if (!points.length) continue;
+      const anchor = project.numberingMode === 'global_sequential' ? previous?.end : null;
+      const { route } = buildOrderWithContinuity(points, group.numbering, anchor);
+      const start = route[0], end = route[route.length - 1];
+      if (!start || !end) continue;
+      if (group.visible !== false) {
+        endpoints.push({ groupId: group.id, start, end });
+        if (previous && previous.group.visible !== false) {
+          links.push({ fromGroupId: previous.group.id, toGroupId: group.id, from: previous.end, to: start });
+        }
+      }
+      // A hidden group still occupies its real place in the numbering sequence.
+      previous = { group, end };
+    }
+  }
+  return { endpoints, links };
 }
 
 function findFirstNonEmptyGroup(project: PileProject, preferredGroupId?: string | null, preferredPipelineId?: string | null) {
@@ -329,7 +366,8 @@ function applyUserConfigToEmptyProject(project: PileProject, config: UserConfig)
     },
     viewSettings: normalizeViewSettingsForCurrentUi({
       ...project.viewSettings,
-      ...(config.viewSettings ?? {})
+      ...(config.viewSettings ?? {}),
+      groupOutlineDisplayVersion: config.viewSettings?.groupOutlineDisplayVersion
     })
   };
 }
@@ -443,7 +481,10 @@ function normalizeViewSettingsForCurrentUi(viewSettings: PileProject['viewSettin
   if (!next.previewPointLabelColor || next.previewPointLabelColor === '#ede9fe') next.previewPointLabelColor = '#ffffff';
   if (next.markerCalloutBackgroundColor === '#020617') next.markerCalloutBackgroundColor = 'rgba(15,23,42,0.82)';
   if (next.numberTextBubbleStrokeColor === '#000000') next.numberTextBubbleStrokeColor = '#334155';
-  if (typeof next.groupOutlineVisible !== 'boolean') next.groupOutlineVisible = true;
+  if (next.groupOutlineDisplayVersion !== 2) {
+    next.groupOutlineVisible = false;
+    next.groupOutlineDisplayVersion = 2;
+  }
   if (typeof next.showVectorPath !== 'boolean') next.showVectorPath = true;
 
   return next;
@@ -461,7 +502,7 @@ function normalizeProject(project: PileProject, uiSource?: Pick<PileProject, 'gr
     // gridSettings/viewSettings are runtime UI config. They may be absent in .pilenum.json
     // and must not be taken from another project when opening a file.
     gridSettings: { ...defaults.gridSettings, ...runtimeGridSettings },
-    viewSettings: normalizeViewSettingsForCurrentUi({ ...defaults.viewSettings, ...runtimeViewSettings }),
+    viewSettings: normalizeViewSettingsForCurrentUi({ ...defaults.viewSettings, ...runtimeViewSettings, groupOutlineDisplayVersion: runtimeViewSettings.groupOutlineDisplayVersion }),
     points: project.points ?? [],
     pipelines,
     groups: normalizeGroupOrderWithinPipelines(project.groups ?? [], pipelines),
@@ -519,7 +560,7 @@ function estimateNearestStepForAuto(points: PilePoint[]) {
     }
     if (Number.isFinite(best)) nearest.push(best);
   }
-  return Math.max(1, percentileNumber(nearest, 0.5) || 1000);
+  return Math.max(1e-9, percentileNumber(nearest, 0.5) || 1);
 }
 
 interface AutoBounds {
@@ -548,10 +589,21 @@ function autoBandOverlap(aMin: number, aMax: number, bMin: number, bMax: number)
   return Math.max(0, Math.min(aMax, bMax) - Math.max(aMin, bMin));
 }
 
+function splitAutoAxisGaps(points: PilePoint[], axis: 'x' | 'y', maxGap: number) {
+  const runs: PilePoint[][] = [];
+  for (const point of [...points].sort((a, b) => a[axis] - b[axis])) {
+    const run = runs[runs.length - 1];
+    if (!run || point[axis] - run[run.length - 1][axis] > maxGap) runs.push([point]);
+    else run.push(point);
+  }
+  return runs;
+}
+
 function denseHorizontalBands(points: PilePoint[], nearestStep: number) {
-  const tolerance = Math.max(500, nearestStep * 0.65);
+  const tolerance = nearestStep * 0.65;
   const minDenseCount = Math.max(6, Math.floor(Math.sqrt(points.length) * 1.25));
   const raw = autoAxisBuckets(points, 'y', tolerance)
+    .flatMap((bucket) => splitAutoAxisGaps(bucket, 'x', nearestStep * 5.5))
     .map((bucket) => ({ points: bucket, bounds: autoBounds(bucket), center: autoCenter(bucket) }))
     .filter((band) => (
       band.points.length >= minDenseCount &&
@@ -647,8 +699,9 @@ function mergeClustersByHorizontalBands(clusters: PilePoint[][], allPoints: Pile
 }
 
 function verticalTailBands(points: PilePoint[], nearestStep: number) {
-  const tolerance = Math.max(500, nearestStep * 0.65);
+  const tolerance = nearestStep * 0.65;
   const columnBuckets = autoAxisBuckets(points, 'x', tolerance)
+    .flatMap((bucket) => splitAutoAxisGaps(bucket, 'y', nearestStep * 5.5))
     .map((bucket) => ({ points: bucket, bounds: autoBounds(bucket), center: autoCenter(bucket) }))
     .filter((band) => (
       band.points.length >= 6 &&
@@ -723,15 +776,21 @@ function refineAutoClusters(points: PilePoint[], clusters: PilePoint[][], neares
   return split.filter((cluster) => cluster.length > 0).sort((a, b) => b.length - a.length);
 }
 
-function connectedAutoClusters(points: PilePoint[]) {
+export function connectedAutoClusters(points: PilePoint[], distanceFactor = 1) {
   if (points.length <= 1) return points.length ? [points] : [];
+  // Canonical ordering makes equal-distance neighbour choices reproducible.
+  points = [...points].sort((a, b) => (a.x - b.x) || (a.y - b.y) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   const nearestStep = estimateNearestStepForAuto(points);
   const xs = points.map((point) => point.x);
   const ys = points.map((point) => point.y);
   const span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys), nearestStep);
-  const softLimit = Math.max(nearestStep * 3.2, span * 0.035, 1200);
-  const neighborLimit = Math.min(Math.max(softLimit, nearestStep * 2.4), Math.max(nearestStep * 5.5, 2500));
+  const secondSteps = points.map((p) => points.filter((q) => q.id !== p.id)
+    .map((q) => pointDistance(p, q)).filter((d) => d > 1e-9).sort((a, b) => a - b))
+    .map((distances) => distances[Math.min(1, distances.length - 1)] ?? nearestStep);
+  const connectionStep = Math.max(nearestStep, percentileNumber(secondSteps, 0.5));
+  const softLimit = Math.max(connectionStep * 3.2, span * 0.035);
+  const neighborLimit = Math.min(Math.max(softLimit, connectionStep * 2.4), connectionStep * 5.5) * distanceFactor;
   const neighbors = new Map<string, string[]>();
 
   for (const point of points) neighbors.set(point.id, []);
@@ -842,9 +901,13 @@ function scoreAxisMethod(points: PilePoint[], axis: 'x' | 'y', tolerance: number
   return coverage * avg * balancePenalty;
 }
 
+export function suggestedAxisTolerance(points: PilePoint[]) {
+  return points.length > 1 ? Number((estimateNearestStepForAuto(points) * 0.35).toPrecision(6)) : 250;
+}
+
 function chooseAutoNumberingForCluster(points: PilePoint[], order: number, pipelineStart: number): NumberingSettings {
   const nearestStep = estimateNearestStepForAuto(points);
-  const tolerance = Math.max(120, Math.min(1500, nearestStep * 0.35));
+  const tolerance = nearestStep * 0.35;
   const rowsScore = scoreAxisMethod(points, 'y', tolerance);
   const columnsScore = scoreAxisMethod(points, 'x', tolerance);
   const method: Exclude<NumberingMethod, 'manual' | 'vector'> = rowsScore >= columnsScore * 1.12 ? 'rows' : columnsScore > rowsScore * 1.12 ? 'columns' : 'route';
@@ -1017,15 +1080,15 @@ function rotateBucketsFromStart<T extends { points: PilePoint[] }>(buckets: T[],
   const startBucketIndex = buckets.findIndex((bucket) => bucket.points.some((p) => p.id === startPointId));
   const indexed = buckets.map((bucket, originalIndex) => ({ bucket, originalIndex, containsStart: originalIndex === startBucketIndex }));
   if (startBucketIndex <= 0) return indexed;
-  return [...indexed.slice(startBucketIndex), ...indexed.slice(startBucketIndex + 1), ...indexed.slice(0, startBucketIndex)];
+  return [...indexed.slice(startBucketIndex), ...indexed.slice(0, startBucketIndex)];
 }
 
 function buildRowsColumnsOrder(points: PilePoint[], settings: NumberingSettings, method: 'rows' | 'columns') {
   if (method === 'columns') {
     const buckets = makeBucketsForNumbering(points, 'x', settings.columnTolerance);
     const direction = settings.direction;
-    const leftToRight = !direction.includes('right');
-    const topToBottom = !direction.includes('bottom');
+    const leftToRight = !direction.includes('right_to_left');
+    const topToBottom = !direction.includes('bottom_to_top') && direction !== 'snake_columns_bottom_left';
     const snake = direction.startsWith('snake_columns');
 
     buckets.sort((a, b) => leftToRight ? a.center - b.center : b.center - a.center);
@@ -1042,7 +1105,7 @@ function buildRowsColumnsOrder(points: PilePoint[], settings: NumberingSettings,
   const buckets = makeBucketsForNumbering(points, 'y', settings.rowTolerance);
   const direction = settings.direction;
   const topToBottom = !direction.includes('bottom_to_top') && !direction.endsWith('bottom_left');
-  const leftToRight = !direction.includes('right_to_left');
+  const leftToRight = !direction.includes('right_to_left') && direction !== 'snake_rows_right_top';
   const snake = direction.startsWith('snake_rows');
 
   buckets.sort((a, b) => topToBottom ? b.center - a.center : a.center - b.center);
@@ -1384,7 +1447,7 @@ function buildVectorOrder(points: PilePoint[], settings: NumberingSettings) {
   return buildVectorNearestRoute(points, settings, scores);
 }
 
-function buildNumberingOrder(points: PilePoint[], settings: NumberingSettings) {
+export function buildNumberingOrder(points: PilePoint[], settings: NumberingSettings) {
   const method = settings.method;
   let route: PilePoint[];
   if (method === 'columns') route = buildRowsColumnsOrder(points, settings, 'columns');
@@ -1599,6 +1662,12 @@ export type EditingTool = 'create' | 'move' | 'copy' | 'props' | null;
 export type EditPointPickMode = 'copy_base' | 'copy_target' | 'props_source' | 'props_target' | null;
 
 interface ProjectState {
+  savedProjectSignature: string;
+  markProjectSaved: (project?: PileProject) => void;
+  groupDetailsId: string | null;
+  openGroupDetails: (id: string) => void;
+  closeGroupDetails: () => void;
+  allGroupsOrderVisible: boolean;
   project: PileProject;
   selectedPointIds: string[];
   selectedGroupId: string | null;
@@ -1718,13 +1787,15 @@ interface ProjectState {
   deleteGroup: (groupId: string) => void;
   updateGroupColor: (groupId: string, color: string) => void;
   updateGroupName: (groupId: string, name: string) => void;
+  updateGroupOrder: (groupId: string, order: number) => void;
   updateGroupMeta: (groupId: string, patch: Record<string, unknown>) => void;
   toggleGroupLocked: (groupId: string) => void;
   updateGroupNumbering: (groupId: string, patch: Partial<NumberingSettings>) => void;
   moveGroup: (groupId: string, direction: -1 | 1) => void;
   assignSelectionToGroup: () => void;
   assignPointIdsToGroup: (ids: string[], groupId?: string | null) => void;
-  autoClusterEditablePoints: () => void;
+  autoClusterEditablePoints: (distanceFactor?: number) => void;
+  applyAutoClusterPreview: (preview: ClusterApplication) => void;
 
   toggleGrid: () => void;
   setBackground: (color: string) => void;
@@ -1747,6 +1818,12 @@ const startupProject = applyUserConfigToEmptyProject(createEmptyProject(), start
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
   project: startupProject,
+  savedProjectSignature: projectSaveSignature(startupProject),
+  markProjectSaved: (project) => set({ savedProjectSignature: projectSaveSignature(project ?? get().project) }),
+  groupDetailsId: null,
+  openGroupDetails: (id) => { if (!get().project.groups.some(group => group.id === id)) return; get().setSelectedGroup(id); set({ groupDetailsId: id }); },
+  closeGroupDetails: () => set({ groupDetailsId: null }),
+  allGroupsOrderVisible: false,
   selectedPointIds: [],
   selectedGroupId: null,
   selectedPipelineId: startupProject.pipelines[0]?.id ?? null,
@@ -1869,6 +1946,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const selectedGroup = normalized.groups[0] ?? null;
     set({ project: normalized, selectedPointIds: [], selectedGroupId: selectedGroup?.id ?? null, selectedPipelineId: selectedGroup?.pipelineId ?? normalized.pipelines[0]?.id ?? null });
     get().recordOperation('project_opened', { name: normalized.project.name, points: normalized.points.length, groups: normalized.groups.length, fileName });
+    get().markProjectSaved();
+    set({ groupDetailsId: null, allGroupsOrderVisible: false });
   },
 
   startNewProjectFromImport: (fileName, points) => {
@@ -1924,6 +2003,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   appendImportedPoints: (fileName, points) => {
+    points = newImportPoints(get().project.points, points);
     if (!points.length) return;
     get().pushHistory();
     set((state) => ({
@@ -1985,7 +2065,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       numberingLinkFromId: null,
       numberingLinkToId: null
     });
-    if (wasPreviewVisible) get().buildNumberingPreview();
+    if (!groupId) set({ numberingPreview: EMPTY_NUMBERING_PREVIEW });
+    else { set({ allGroupsOrderVisible: false }); if (wasPreviewVisible) get().buildNumberingPreview(); }
   },
 
   setSelectedPipeline: (pipelineId) => {
@@ -2300,7 +2381,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       locked: false,
       manualNumber: false,
       syncState: 'added',
-      meta: { ...(p.meta ?? {}), copiedFrom: p.id }
+      meta: { ...(p.meta ?? {}), cadHandle: undefined, cadDocument: undefined, copiedFrom: p.id }
     }));
 
     get().pushHistory();
@@ -2405,7 +2486,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   clearNumberingPreview: () => set({ numberingPreview: EMPTY_NUMBERING_PREVIEW }),
 
-  cancelNumberingPreview: () => set({ numberingPreview: EMPTY_NUMBERING_PREVIEW, numberingPickMode: null, numberingLinkFromId: null, numberingLinkToId: null, manualLinkClearMode: false, manualLinkClearSelection: [] }),
+  cancelNumberingPreview: () => set({ allGroupsOrderVisible: false, numberingPreview: EMPTY_NUMBERING_PREVIEW, numberingPickMode: null, numberingLinkFromId: null, numberingLinkToId: null, manualLinkClearMode: false, manualLinkClearSelection: [] }),
 
   cancelNumberingLinkSelection: () => {
     const { numberingPickMode, numberingLinkFromId, numberingLinkToId, manualLinkClearMode } = get();
@@ -2492,6 +2573,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   setNumberingPreviewMode: (mode) => {
+    if (mode === 'full' && !get().selectedGroupId) {
+      set({ allGroupsOrderVisible: !get().allGroupsOrderVisible, numberingPreview: EMPTY_NUMBERING_PREVIEW });
+      return;
+    }
+    set({ allGroupsOrderVisible: false });
     const preview = get().numberingPreview;
     const selectedGroupId = get().selectedGroupId;
     if (preview.visible && preview.displayMode === mode && (!selectedGroupId || preview.groupId === selectedGroupId)) {
@@ -2903,6 +2989,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const currentGroups = project.groups;
     const orderInPipeline = sortedGroupsForPipeline(project, pipelineId).length + 1;
     const group = makeGroup(orderInPipeline, currentGroups, pipelineId);
+    const selected = project.points.filter((p) => get().selectedPointIds.includes(p.id));
+    const tolerance = suggestedAxisTolerance(selected.length > 1 ? selected : project.points);
+    group.numbering = { ...group.numbering, rowTolerance: tolerance, columnTolerance: tolerance };
     set((state) => ({
       project: {
         ...state.project,
@@ -2943,6 +3032,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   updateGroupName: (groupId, name) => {
+    const group = get().project.groups.find(g => g.id === groupId);
+    if (!group || group.locked || group.name === name) return;
+    get().pushHistory();
     set((state) => ({
       project: { ...state.project, groups: state.project.groups.map((g) => (g.id === groupId ? { ...g, name } : g)) }
     }));
@@ -3040,24 +3132,66 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     get().assignPointIdsToGroup(selectedPointIds, selectedGroupId);
   },
 
-  autoClusterEditablePoints: () => {
+  autoClusterEditablePoints: (distanceFactor = 1) => {
     const { project, selectedPointIds, selectedPipelineId } = get();
     if (project.points.length < 2) return;
 
     const lockedGroupIds = new Set(project.groups.filter((group) => group.locked).map((group) => group.id));
-    const isEditablePoint = (point: PilePoint) => !point.groupId || !lockedGroupIds.has(point.groupId);
+    const isEditablePoint = (point: PilePoint) => !point.locked && (!point.groupId || !lockedGroupIds.has(point.groupId));
     const selectedSet = new Set(selectedPointIds);
     const selectedCandidates = project.points.filter((point) => selectedSet.has(point.id) && isEditablePoint(point));
     const candidates = selectedCandidates.length >= 2 ? selectedCandidates : project.points.filter(isEditablePoint);
     if (candidates.length < 2) return;
+
+    get().applyAutoClusterPreview({ sourcePoints: candidates,
+      pipelineId: project.pipelines.some(p => p.id === selectedPipelineId) ? selectedPipelineId : null,
+      result: { method: 'connected', clusters: connectedAutoClusters(candidates, distanceFactor).map(c => c.map(p => p.id)),
+        unassignedIds: [], warnings: [], pointCount: candidates.length,
+        options: { ...DEFAULT_CLUSTER_OPTIONS, radiusFactor: distanceFactor } } });
+  },
+
+  updateGroupOrder: (groupId, order) => {
+    if (!Number.isFinite(order)) return;
+    const project = get().project;
+    const group = project.groups.find(g => g.id === groupId);
+    if (!group || group.locked) return;
+    const groups = sortedGroupsForPipeline(project, groupPipelineId(group, project));
+    const target = Math.max(0, Math.min(groups.length - 1, Math.trunc(order) - 1));
+    const index = groups.findIndex(g => g.id === groupId);
+    if (index === target) return;
+    groups.splice(index, 1);
+    groups.splice(target, 0, group);
+    const orders = new Map(groups.map((g, i) => [g.id, i + 1]));
+    get().pushHistory();
+    set({ project: { ...project, groups: project.groups.map(g => orders.has(g.id) ? {...g, order: orders.get(g.id)!} : g) }, numberingPreview: EMPTY_NUMBERING_PREVIEW });
+    get().recordOperation('group_order_changed', { groupId, order: target + 1 });
+  },
+
+  applyAutoClusterPreview: ({ result, sourcePoints: candidates, pipelineId: selectedPipelineId }) => {
+    const { project } = get();
+    const currentById = new Map(project.points.map(p => [p.id, p]));
+    const lockedGroupIds = new Set(project.groups.filter(g => g.locked).map(g => g.id));
+    if (candidates.some(p => !currentById.has(p.id) || JSON.stringify(currentById.get(p.id)) !== JSON.stringify(p)
+      || p.locked || (p.groupId && lockedGroupIds.has(p.groupId)))) {
+      throw new Error('Точки или блокировки изменились. Закройте окно и постройте предпросмотр заново.');
+    }
+    if (selectedPipelineId && !project.pipelines.some(p => p.id === selectedPipelineId)) {
+      throw new Error('Пайплайн был удалён. Откройте авторазбивку заново.');
+    }
+    const expectedIds = new Set(candidates.map(p => p.id));
+    const receivedIds = [...result.clusters.flat(), ...result.unassignedIds];
+    if (expectedIds.size !== candidates.length || receivedIds.length !== expectedIds.size
+      || new Set(receivedIds).size !== receivedIds.length || receivedIds.some(id => !expectedIds.has(id))
+      || result.clusters.some(cluster => !cluster.length)) {
+      throw new Error('Некорректный результат: точки повторяются или отсутствуют. Проект не изменён.');
+    }
 
     const pipelineId = selectedPipelineId && project.pipelines.some((pipeline) => pipeline.id === selectedPipelineId)
       ? selectedPipelineId
       : defaultPipelineId(project);
     const pipelineStart = pipelineStartNumber(project, pipelineId);
     const candidateIds = new Set(candidates.map((point) => point.id));
-    const clusters = orderClustersByRoute(connectedAutoClusters(candidates));
-    if (clusters.length === 0) return;
+    const clusters = orderClustersByRoute(result.clusters.map(ids => ids.map(id => currentById.get(id)!)));
 
     const keepGroupIds = new Set<string>();
     for (const group of project.groups) {
@@ -3067,7 +3201,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (!candidateIds.has(point.id) && point.groupId) keepGroupIds.add(point.groupId);
     }
 
-    const keptGroups = project.groups.filter((group) => keepGroupIds.has(group.id));
+    const affectedGroupIds = new Set(candidates.map(p => p.groupId));
+    const keptGroups = project.groups.filter((group) => keepGroupIds.has(group.id) || !affectedGroupIds.has(group.id));
     const newGroups: PileGroup[] = [];
     const pointToGroupId = new Map<string, string>();
 
@@ -3085,6 +3220,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         meta: {
           autoClustered: true,
           autoClusterSize: cluster.length,
+          autoClusterMethod: result.method,
+          autoClusterOptions: result.options,
           autoClusterCreatedAt: new Date().toISOString()
         }
       };
@@ -3094,8 +3231,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     get().pushHistory();
     const nextPoints = project.points.map((point) => (
-      pointToGroupId.has(point.id)
-        ? { ...point, groupId: pointToGroupId.get(point.id) ?? point.groupId, number: null, manualNumber: false, locked: false }
+      candidateIds.has(point.id)
+        ? { ...point, groupId: pointToGroupId.get(point.id) ?? null, number: null, manualNumber: false, locked: false }
         : point
     ));
     const groups = normalizeGroupOrderWithinPipelines([...keptGroups, ...newGroups], project.pipelines);
@@ -3119,13 +3256,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       pipelineId,
       clusters: newGroups.length,
       points: candidates.length,
-      scope: selectedCandidates.length >= 2 ? 'selection' : 'editable_project',
+      unassigned: result.unassignedIds.length,
       methods: newGroups.reduce<Record<string, number>>((acc, group) => {
         const method = group.numbering.method;
         acc[method] = (acc[method] ?? 0) + 1;
         return acc;
       }, {}),
-      strategy: 'nearest_graph_with_dense_band_refinement'
+      strategy: result.method === 'connected' ? 'nearest_graph_with_dense_band_refinement' : result.method
     });
   },
 

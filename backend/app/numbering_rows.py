@@ -67,13 +67,13 @@ def build_rows_order(points: list[PilePoint], settings: NumberingSettings) -> li
     if method == "columns":
         buckets = _make_buckets(points, "x", settings.columnTolerance)
         direction = settings.direction
-        left_to_right = "right" not in direction
-        top_to_bottom = "bottom" not in direction
+        left_to_right = "right_to_left" not in direction
+        top_to_bottom = "bottom_to_top" not in direction and direction != "snake_columns_bottom_left"
         snake = direction.startswith("snake_columns")
         buckets = sorted(buckets, key=lambda b: b.center, reverse=not left_to_right)
         route: list[PilePoint] = []
         for idx, bucket in enumerate(buckets):
-            reverse = not top_to_bottom
+            reverse = top_to_bottom
             if snake and idx % 2 == 1:
                 reverse = not reverse
             route.extend(sorted(bucket.points, key=lambda p: p.y, reverse=reverse))
@@ -82,7 +82,7 @@ def build_rows_order(points: list[PilePoint], settings: NumberingSettings) -> li
     buckets = _make_buckets(points, "y", settings.rowTolerance)
     direction = settings.direction
     top_to_bottom = "bottom_to_top" not in direction and not direction.endswith("bottom_left")
-    left_to_right = "right_to_left" not in direction
+    left_to_right = "right_to_left" not in direction and direction != "snake_rows_right_top"
     snake = direction.startswith("snake_rows")
 
     # В инженерных координатах Y вверх, значит верхние ряды имеют больший Y.

@@ -44,14 +44,14 @@ def reject(text: str, needle: str, where: str, reason: str) -> None:
 def check_toolbar() -> None:
     toolbar = read("frontend/src/components/Toolbar.tsx")
     fixed_labels = [
-        "Создать", "Открыть", "Проекты", "Импорт", "Сохранить", "Переим.", "Экспорт",
-        "Точка", "Удалить", "Переместить", "Копировать", "Коп.св-ва", "Инфо",
-        "Группы", "Назначить", "Весь путь", "Очистить", "Группа", "Все",
-        "Всё поле", "Сетка", "Номера", "Пустые", "Проверка", "Настройки", "Отмена", "Повтор", "Журнал",
+        "Создать", "Открыть", "Проекты", "Импорт", "Сохранить", "Имя проекта", "Экспорт",
+        "Новая точка", "Удалить", "Переместить", "Копировать", "Копия группы", "О точке",
+        "Группы", "В группу", "Порядок", "Убрать связи", "№ группы", "№ всех",
+        "Всё поле", "Сетка", "Номера", "Без номера", "Проверка", "Настройки", "Отмена", "Повтор", "Журнал",
     ]
     for label in fixed_labels:
         require(toolbar, f'label="{label}"', "Toolbar.tsx")
-    require(toolbar, "Мультик", "Toolbar.tsx")
+    require(toolbar, "Анимация", "Toolbar.tsx")
     require(toolbar, "autoAssignSelection", "Toolbar.tsx")
     require(toolbar, "handleAssignCommand", "Toolbar.tsx")
     require(toolbar, "ghost-ribbon-group", "Toolbar.tsx")
@@ -77,7 +77,7 @@ def check_toolbar() -> None:
     require(toolbar, "importNanoCadModelStudioObjects", "Toolbar.tsx")
     require(toolbar, "exportNanoCadModelStudioObjects", "Toolbar.tsx")
     require(toolbar, "setNanoCadTransferStatus", "Toolbar.tsx")
-    require(toolbar, "Скан nanoCAD для экспорта", "Toolbar.tsx")
+    require(toolbar, "Способ поиска объектов", "Toolbar.tsx")
     require(toolbar, "refreshNanoCadBlocks('export')", "Toolbar.tsx")
     require(toolbar, "pickNanoCadSample('export')", "Toolbar.tsx")
     require(toolbar, "refreshNanoCadModelStudioObjects('export')", "Toolbar.tsx")

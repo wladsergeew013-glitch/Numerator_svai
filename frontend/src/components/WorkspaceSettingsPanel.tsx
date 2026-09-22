@@ -474,6 +474,11 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
 
         {tab === 'markers' && (
           <div className="settings-tab-page">
+            <label className="checkbox-line">
+              <input type="checkbox" checked={project.viewSettings.showGroupFlow === true} onChange={e => updateViewSettings({ showGroupFlow: e.target.checked })} />
+              <span>Старты, финиши и пунктирные связи всех групп</span>
+            </label>
+            <div className="settings-help">Голубая обводка — старт, оранжевая — финиш. Стрелки показывают переходы между группами одного пайплайна. Это визуальный слой, он не меняет номера и ручные связи.</div>
             <div className="popover-subtitle">Подписи Старт / Финиш / База / Источник</div>
             <label className="checkbox-line" data-tooltip="Служебные подписи Старт/Финиш/База/Источник" {...hover('markers')}>
               <input

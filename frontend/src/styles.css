@@ -4844,4 +4844,209 @@ button, input, select { font: inherit; }
   top: 6px;
   color: #22c55e;
 }
+.transfer-fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.cad-transfer-progress {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  margin: 10px 0;
+  border: 1px solid #3b82a0;
+  border-radius: 8px;
+  background: #102b3a;
+  color: #e0f2fe;
+  overflow-wrap: anywhere;
+}
+.cad-transfer-progress progress { width: 100%; height: 12px; accent-color: #38bdf8; }
+.cad-transfer-progress.failed { border-color: #ef4444; background: #3a2027; }
+.cad-transfer-progress.completed { border-color: #22c55e; }
+.cad-transfer-progress span, .cad-transfer-progress small { font-size: 12px; }
+.cad-operation-log-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.cad-operation-duration { font-variant-numeric: tabular-nums; }
+.cad-operation-log-text { width: 100%; min-height: 130px; resize: vertical; box-sizing: border-box; font: 12px/1.5 monospace; }
+.cad-scope { display: grid; gap: 6px; margin: 8px 0 12px; }
+.ribbon-icon svg { width: 24px; height: 24px; display: block; }
+.ribbon-command:focus-visible { outline: 2px solid #38bdf8; outline-offset: -2px; }
 
+/* One section heading leaves room for commands even at the minimum ribbon height. */
+.ribbon-toolbar { min-height: 124px !important; gap: 2px !important; }
+.ribbon-scroll { min-height: 0 !important; padding: 0 0 2px !important; gap: 4px !important; }
+.ribbon-section:not(.collapsed-ribbon-section) {
+  width: max-content !important;
+  min-width: 0 !important;
+  padding: 2px 4px !important;
+  grid-template-rows: 16px minmax(0, 1fr) !important;
+}
+.ribbon-section:not(.collapsed-ribbon-section) .file-ribbon-group,
+.ribbon-section:not(.collapsed-ribbon-section) .ribbon-command-subgroup {
+  display: flex !important;
+  padding: 0 3px !important;
+  gap: 0 !important;
+  min-width: 0 !important;
+}
+.file-ribbon-group-title, .ribbon-subtitle { display: none !important; }
+.ribbon-command, .ribbon-command-subgroup .ribbon-command {
+  padding: 2px !important;
+  justify-content: center !important;
+  gap: 2px !important;
+}
+.ribbon-command .ribbon-label {
+  white-space: normal !important;
+  line-height: 12px !important;
+  min-height: 24px !important;
+  max-height: 24px !important;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+}
+.ribbon-command-tile { border: 0 !important; background: transparent !important; box-shadow: none !important; }
+.ribbon-command, .ribbon-command-subgroup .ribbon-command { padding: 0 2px !important; gap: 0 !important; }
+.ribbon-command-tile { height: 20px !important; min-height: 20px !important; flex-shrink: 0; }
+.ribbon-icon svg { width: 20px; height: 20px; }
+.ribbon-command .ribbon-label { line-height: 11px !important; min-height: 22px !important; max-height: 22px !important; }
+
+/* A group list and one inspector keep the CAD field visible. */
+.group-manager-panel { container-type: inline-size !important; }
+.group-manager-content-v32 { padding: 10px !important; gap: 10px !important; }
+.group-manager-header-grid { grid-template-columns: 1fr !important; gap: 8px !important; }
+.group-manager-panel .manager-section { padding: 0 !important; border: 0 !important; border-radius: 0 !important; background: transparent !important; box-shadow: none !important; }
+.pipeline-section > .manager-section-head, .manager-actions-section > .manager-section-head { display: none !important; }
+.group-manager-panel .manager-action-grid { display: flex !important; gap: 6px !important; }
+.group-manager-panel .manager-action-button { min-height: 30px !important; height: 30px !important; padding: 4px 10px !important; flex-direction: row !important; border-radius: 5px !important; }
+.group-manager-panel .manager-action-icon { font-size: 15px !important; }
+.group-manager-panel .manager-action-icon { width: 18px !important; height: 18px !important; padding: 0 !important; border: 0 !important; background: transparent !important; box-shadow: none !important; }
+.group-manager-panel .manager-action-button { display: flex !important; justify-content: center !important; align-items: center !important; gap: 6px !important; }
+.group-manager-panel .manager-action-text, .group-manager-panel .group-name-line { font-weight: 600 !important; }
+
+.auto-cluster-backdrop { position: fixed; inset: 0; z-index: 30000; background: #0009; display: grid; place-items: center; padding: 16px; }
+.auto-cluster-dialog { display: flex; flex-direction: column; width: min(1050px, 100%); max-height: calc(100dvh - 32px); overflow: hidden; border: 1px solid #40556d; border-radius: 10px; background: #111d2b; color: #e2e8f0; box-shadow: 0 20px 80px #0008; }
+.auto-cluster-dialog header { display: flex; justify-content: space-between; align-items: start; gap: 12px; padding: 16px 20px; border-bottom: 1px solid #334155; }
+.auto-cluster-dialog h2 { margin: 0 0 5px; font-size: 18px; }
+.auto-cluster-dialog header span { font-size: 12px; color: #aebfd3; }
+.auto-cluster-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: 0; overflow: auto; }
+.auto-cluster-layout nav { display: flex; flex-direction: column; gap: 4px; padding: 12px; border-right: 1px solid #334155; }
+.cluster-method-button { text-align: left; padding: 10px; color: #cbd5e1; background: transparent; border: 1px solid transparent; border-radius: 5px; cursor: pointer; font: inherit; font-size: 12px; }
+.cluster-method-button.active { background: #203c50; border-color: #38bdf8; color: #e0f2fe; }
+.cluster-method-button:focus-visible { outline: 2px solid #38bdf8; }
+.cluster-future { margin-top: 12px; padding-top: 12px; border-top: 1px solid #334155; color: #94a3b8; font-size: 12px; line-height: 1.5; }
+.auto-cluster-layout main { min-width: 0; padding: 14px 18px; }
+.cluster-method-description { margin: 0 0 12px; color: #bfdbfe; font-size: 13px; line-height: 1.5; }
+.cluster-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.cluster-options label { display: grid; gap: 6px; font-size: 12px; }
+.cluster-options input[type=number] { width: 100%; min-width: 0; padding: 7px; color: #e2e8f0; background: #0d1724; border: 1px solid #40556d; border-radius: 4px; }
+.cluster-options .cluster-check { display: flex; flex-wrap: wrap; align-items: center; }
+.cluster-calculate-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 14px 0; }
+.cluster-calculate-row span { font-size: 11px; color: #94a3b8; flex: 1; min-width: 160px; }
+.auto-cluster-map { display: block; width: 100%; background: #091421; border: 1px solid #334155; border-radius: 5px; }
+.cluster-result { display: grid; gap: 6px; margin-top: 10px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.cluster-warning { color: #fbbf24; }
+.cluster-error { color: #fecaca; background: #442831; padding: 10px; border-radius: 5px; margin-bottom: 10px; overflow-wrap: anywhere; }
+.cluster-progress { display: flex; gap: 10px; align-items: center; font-size: 12px; margin: 10px 0; }
+.auto-cluster-dialog header, .auto-cluster-dialog footer { flex-shrink: 0; }
+.auto-cluster-dialog footer { padding: 12px 20px; border-top: 1px solid #334155; }
+.auto-cluster-dialog footer p { font-size: 12px; color: #b7c6d8; line-height: 1.5; margin: 0 0 10px; }
+.auto-cluster-dialog footer > div { display: flex; justify-content: flex-end; gap: 8px; }
+.group-flow-legend { position: absolute; right: 12px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 12px; padding: 7px 10px; border: 1px solid #40556d; border-radius: 5px; background: #111d2bee; color: #dbeafe; font-size: 11px; pointer-events: none; max-width: calc(100% - 90px); }
+.group-flow-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.group-flow-legend i { display: inline-block; width: 11px; height: 11px; border-radius: 50%; border: 2px solid; }
+.group-flow-legend .flow-start { border-color: #22d3ee; }
+.group-flow-legend .flow-end { border-color: #fb923c; width: 14px; height: 14px; }
+@media (max-width: 680px) {
+  .auto-cluster-backdrop { padding: 8px; }
+  .auto-cluster-layout { grid-template-columns: 1fr; }
+  .auto-cluster-layout nav { display: grid; grid-template-columns: 1fr 1fr; border-right: 0; border-bottom: 1px solid #334155; }
+  .cluster-future { grid-column: 1 / -1; }
+  .cluster-options { grid-template-columns: 1fr; }
+}
+.group-manager-panel .manager-action-text { font-size: 12px !important; }
+.group-manager-panel .manager-status-grid { display: flex !important; gap: 16px !important; margin-top: 6px !important; }
+.group-list-head > div > span { font-size: 11px !important; }
+.group-view-option { display: flex !important; align-items: center !important; gap: 6px !important; font-size: 11px !important; color: #a6b6c9 !important; margin: 4px 0 8px !important; }
+.group-manager-workspace { display: grid !important; grid-template-columns: minmax(180px, .8fr) minmax(280px, 1.2fr) !important; gap: 12px !important; align-items: start !important; }
+.group-manager-panel .group-list-v32 { grid-template-columns: 1fr !important; gap: 0 !important; overflow: visible !important; }
+.group-manager-panel .group-card-v32 { border: 0 !important; border-bottom: 1px solid #334155 !important; border-radius: 0 !important; box-shadow: none !important; padding: 0 !important; background: transparent !important; }
+.group-manager-panel .group-card-v32.active { background: #193448 !important; box-shadow: inset 3px 0 #38bdf8 !important; }
+.group-manager-panel .group-card-top-v32 { display: flex !important; gap: 5px !important; padding: 7px 5px !important; min-height: 46px !important; flex-wrap: wrap !important; }
+.group-manager-panel .group-title-block { min-width: 70px !important; flex: 1 !important; }
+.group-select-button { background: transparent !important; border: 0 !important; color: inherit !important; text-align: left !important; padding: 0 !important; cursor: pointer !important; }
+.group-select-button:focus-visible { outline: 2px solid #38bdf8 !important; }
+.group-manager-panel .group-name-line { font-size: 12px !important; white-space: normal !important; }
+.group-manager-panel .group-meta-line { font-size: 10px !important; }
+.group-manager-panel .group-order-chip { font-size: 10px !important; min-width: 16px !important; padding: 2px !important; }
+.group-manager-panel .group-card-top-v32 .badge, .group-manager-panel .group-card-top-v32 > .active-badge { display: none !important; }
+.group-manager-panel .group-order-quick { gap: 1px !important; }
+.group-manager-panel .group-card-top-v32 .btn { padding: 2px 4px !important; min-width: 20px !important; }
+.group-manager-panel .color-swatch-button { width: 15px !important; height: 15px !important; border-radius: 3px !important; }
+.selected-group-inspector { border-left: 1px solid #334155 !important; padding-left: 12px !important; min-width: 0 !important; }
+.inspector-title { display: grid !important; gap: 3px !important; padding: 0 0 10px !important; }
+.inspector-title span { font-size: 11px !important; color: #9cacc0 !important; }
+.group-manager-panel .group-card-body-v32 { padding: 0 !important; border: 0 !important; background: transparent !important; gap: 12px !important; }
+.group-manager-panel .group-settings-grid { grid-template-columns: 1fr 1fr !important; gap: 9px !important; }
+.group-manager-panel .group-tools-grid { grid-template-columns: 1fr !important; }
+.group-manager-panel .numbering-points-box, .group-manager-panel .outline-tools-box { border: 0 !important; background: transparent !important; border-top: 1px solid #334155 !important; border-radius: 0 !important; padding: 8px 0 !important; }
+.method-picker { display: grid !important; grid-template-columns: repeat(4, 1fr) !important; gap: 4px !important; grid-column: 1 / -1 !important; }
+.method-choice { min-width: 0 !important; padding: 3px 0 5px !important; color: #aebfd3 !important; background: #172333 !important; border: 1px solid transparent !important; border-radius: 5px !important; cursor: pointer !important; }
+.method-choice.selected { color: #7dd3fc !important; background: #18374b !important; border-color: #38bdf8 !important; }
+.method-choice:disabled { opacity: .55 !important; cursor: default !important; }
+.method-choice span { display: block !important; font-size: 10px !important; white-space: nowrap !important; }
+.numbering-method-preview { display: block !important; width: 100% !important; --method-dot: #172333 !important; }
+.numbering-method-preview text { font-size: 8px !important; }
+.axis-tolerance-help { grid-column: 1 / -1 !important; display: flex !important; flex-wrap: wrap !important; gap: 6px !important; align-items: center !important; }
+.axis-tolerance-help span { color: #fbbf24 !important; font-size: 11px !important; }
+.all-group-settings .group-manager-workspace { display: block !important; }
+.all-group-settings .group-card-body-v32 { padding: 10px !important; }
+@container (max-width: 590px) {
+  .group-manager-workspace { grid-template-columns: 1fr !important; }
+  .selected-group-settings .group-list-v32 { max-height: 180px !important; overflow: auto !important; }
+  .selected-group-inspector { border-left: 0 !important; border-top: 1px solid #334155 !important; padding: 10px 0 0 !important; }
+}
+
+/* Current inspector remains accessible while the group list scrolls. */
+.group-manager-panel .group-manager-content { overflow: visible !important; }
+.group-manager-panel > .floating-panel-body { container-type: size; }
+.group-manager-panel .selected-group-inspector { position: sticky !important; top: 0 !important; align-self: start !important; max-height: calc(100cqh - 12px); overflow-y: auto; }
+.group-manager-panel .group-settings-grid > .field-row { display: grid !important; grid-template-columns: 1fr !important; gap: 5px !important; grid-column: 1 / -1; }
+.group-manager-panel .group-settings-grid > .field-row input { width: 100% !important; min-width: 0 !important; }
+.canvas-wrap > .group-flow-legend { display: flex !important; align-items: center; gap: 10px 18px !important; line-height: 20px; box-sizing: border-box; max-width: calc(100% - 140px); }
+.canvas-wrap > .group-flow-legend-narrow { top: 12px; bottom: auto; max-width: calc(100% - 24px); }
+.group-flow-legend > span { display: inline-flex !important; align-items: center; gap: 7px !important; white-space: nowrap; }
+.cad-action-block { position: sticky; bottom: 0; z-index: 3; background: #101d30; padding: 12px; margin-top: 12px; border: 1px solid #40556d; border-radius: 8px; box-shadow: 0 -5px 15px #0003; }
+.cad-action-block .project-status { margin: 8px 0; }
+.cad-scan-result { scroll-margin-bottom: 130px; }
+.cad-action-block .cad-transfer-progress { margin: 8px 0; padding: 8px; }
+.cad-scan-result { margin-top: 10px; }
+
+/* Group list owns its scroll; the pipeline and assignment commands remain visible. */
+.draggable-panel.group-manager-panel { min-width: 420px !important; }
+.group-manager-panel > .floating-panel-body { overflow: hidden !important; display: flex; container-type: normal; }
+.group-manager-panel .group-manager-compact { display: flex !important; flex-direction: column !important; min-height: 0 !important; width: 100%; overflow: hidden !important; padding: 6px !important; }
+.group-manager-compact .group-manager-header-grid { flex: 0 0 auto; }
+.group-manager-compact .group-list-section { flex: 1 1 auto; min-height: 0; overflow-y: auto !important; }
+.group-manager-compact .group-manager-workspace { display: block !important; }
+.group-list-help { color: #94a3b8; font-size: 11px; padding: 4px 0 8px; }
+.group-numbering-status { flex: 0 0 20px; text-align: center; font-size: 18px; color: #94a3b8; }
+.group-numbering-status.done { color: #4ade80; }
+.group-numbering-status.partial { color: #fbbf24; }
+.group-manager-panel .manager-action-button { overflow: hidden !important; }
+.group-manager-panel .manager-action-button .manager-action-icon { background: transparent !important; box-shadow: none !important; border: 0 !important; border-radius: 0 !important; min-width: 18px !important; min-height: 18px !important; width: 18px !important; height: 18px !important; line-height: 18px !important; }
+.group-manager-panel .manager-action-button::before, .group-manager-panel .manager-action-button::after, .manager-action-icon::before, .manager-action-icon::after { content: none !important; display: none !important; }
+.group-details-summary { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; color: #a5c8e9; }
+.group-details-panel .group-settings-grid { grid-template-columns: 1fr !important; }
+.group-details-panel .field-row { grid-template-columns: 1fr !important; gap: 5px; }
+.group-details-panel .field-row > input, .group-details-panel .field-row > select { width: 100% !important; min-width: 0 !important; box-sizing: border-box; }
+.group-details-panel .group-tools-grid { grid-template-columns: 1fr !important; }
+/* One tile treatment for every ribbon section and all icon sources. */
+.ribbon-command .ribbon-command-tile { background: transparent !important; border: 1px solid transparent !important; box-shadow: none !important; border-radius: 6px !important; }
+.ribbon-command:hover .ribbon-command-tile { background: #203653 !important; border-color: #4b6b90 !important; }
+.ribbon-command.active .ribbon-command-tile { background: #214b87 !important; border-color: #77baff !important; box-shadow: inset 0 0 0 1px #a5d7ff33 !important; }
+.ribbon-command .ribbon-icon { background: transparent !important; border: 0 !important; box-shadow: none !important; border-radius: 0 !important; }
+.ribbon-command:focus-visible .ribbon-command-tile { outline: 2px solid #7dd3fc; outline-offset: 2px; }
+
+.close-project-backdrop { position: fixed; inset: 0; z-index: 2147483647; background: #0009; display: grid; place-items: center; }
+.close-project-dialog { width: min(520px, 90vw); padding: 24px; border-radius: 12px; border: 1px solid #577394; background: #101b2e; color: #e2edff; box-shadow: 0 20px 80px #0008; }
+.close-project-dialog h2 { margin-top: 0; font-size: 20px; }
+.close-project-dialog [role="alert"] { color: #fda4af; }

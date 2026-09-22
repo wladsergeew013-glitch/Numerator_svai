@@ -17,10 +17,12 @@ frontend/.vite/
 dist/
 build/
 *.spec
+!tools/PileNumbering.spec
 
 # Logs / generated dumps
 logs/
 tools/out/
+tests/out/
 *.log
 
 # Local/runtime data
@@ -28,6 +30,7 @@ config/user_config.json
 projects/*.autosave_*.pilenum.json
 autosaves/
 data/images/
+data/previous-builds/
 
 # Backup files from previous patches
 *.v*_backup_*

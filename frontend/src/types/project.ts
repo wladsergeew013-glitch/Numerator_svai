@@ -77,8 +77,8 @@ export const DIRECTION_LABELS: Record<NumberingDirection, string> = {
   right_to_left_bottom_to_top: 'Ряды: справа налево, снизу вверх',
   snake_rows_left_top: 'Ряды: змейка от левого верхнего угла',
   snake_rows_right_top: 'Ряды: змейка от правого верхнего угла',
-  snake_columns_top_left: 'Столбцы: сверху вниз, слева направо',
-  snake_columns_bottom_left: 'Столбцы: снизу вверх, слева направо'
+  snake_columns_top_left: 'Столбцы: змейка от левого верхнего угла',
+  snake_columns_bottom_left: 'Столбцы: змейка от левого нижнего угла'
 };
 
 export const DIRECTION_DESCRIPTIONS: Record<NumberingDirection, string> = {
@@ -180,6 +180,9 @@ export interface ViewSettings {
   showPointNumbers: boolean;
   highlightUnnumbered: boolean;
   showNumberingPreview: boolean;
+  showGroupFlow: boolean;
+  showGroupNumbers: boolean;
+  groupOutlineDisplayVersion?: number;
   showVectorPath: boolean;
   markerTextColor: string;
   markerTextStrokeColor: string;
@@ -333,6 +336,9 @@ export function createEmptyProject(): PileProject {
       showPointNumbers: true,
       highlightUnnumbered: true,
       showNumberingPreview: true,
+      showGroupFlow: false,
+      showGroupNumbers: false,
+      groupOutlineDisplayVersion: 2,
       showVectorPath: true,
       markerTextColor: '#ffffff',
       markerTextStrokeColor: '#020617',
@@ -345,7 +351,7 @@ export function createEmptyProject(): PileProject {
       showMarkerLabels: true,
       groupOutlineStrokeColor: '#64748b',
       groupOutlineFillColor: 'rgba(96,165,250,0.035)',
-      groupOutlineVisible: true,
+      groupOutlineVisible: false,
       groupOutlineStrokeWidth: 1.7,
       groupOutlineDashSize: 10,
       groupOutlinePadding: 28,

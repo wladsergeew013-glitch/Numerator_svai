@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { CloseProjectGuard } from './components/CloseProjectGuard';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { autosaveProject, getUserConfig, importCsv, type AutosaveSettingsPayload } from './api/client';
 import { CadTooltip } from './components/CadTooltip';
 import { CanvasView } from './components/CanvasView';
@@ -14,8 +15,6 @@ import './styles.css';
 const DEFAULT_TOOLBAR_HEIGHT = 150;
 const STATUS_BAR_HEIGHT = 28;
 const DOCK_REGISTRY_KEY = 'pile-numbering:docked-panels:v2';
-const MAX_DOCK_WIDTH = 920;
-const MIN_CANVAS_WIDTH_WHEN_DOCKED = 160;
 
 // Dock registry is runtime-only. Old persisted entries may describe windows
 // that are not mounted anymore; if we keep them, the canvas gets a phantom
@@ -27,11 +26,6 @@ if (typeof window !== 'undefined') {
   } catch {
     // ignore storage errors
   }
-}
-
-interface DockRecord {
-  id: string;
-  dock: 'left' | 'right';
 }
 
 function loadToolbarHeight() {
@@ -46,46 +40,24 @@ function loadToolbarHeight() {
   }
 }
 
-function readDockRegistry(): DockRecord[] {
-  try {
-    const raw = window.localStorage.getItem(DOCK_REGISTRY_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is DockRecord => item && typeof item.id === 'string' && (item.dock === 'left' || item.dock === 'right'));
-  } catch {
-    return [];
-  }
-}
-
-function loadPanelWidth(id: string, fallback: number) {
-  if (typeof window === 'undefined') return fallback;
-  try {
-    const raw = window.localStorage.getItem(`pile-numbering:panel:${id}`);
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw) as { width?: number };
-    return typeof parsed.width === 'number' ? Math.min(Math.max(parsed.width, 180), Math.min(MAX_DOCK_WIDTH, window.innerWidth * 0.68)) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function clampDockReserve(raw: { left: number; right: number }) {
-  const maxReserve = Math.max(0, window.innerWidth - MIN_CANVAS_WIDTH_WHEN_DOCKED);
-  const left = Math.max(0, Math.ceil(raw.left || 0));
-  const right = Math.max(0, Math.ceil(raw.right || 0));
-  const total = left + right;
-  if (total <= maxReserve) return { left, right };
-  const scale = maxReserve / Math.max(1, total);
-  return { left: Math.floor(left * scale), right: Math.floor(right * scale) };
-}
-
 function computeDockReserve() {
   const reserve = { left: 0, right: 0 };
-  for (const item of readDockRegistry()) {
-    reserve[item.dock] += loadPanelWidth(item.id, item.id === 'group-manager' ? 360 : 380);
+  // Reserve the rendered panel bounds, not stale widths in saved preferences.
+  for (const panel of document.querySelectorAll<HTMLElement>('.docked-panel')) {
+    const rect = panel.getBoundingClientRect();
+    if (!rect.width || !rect.height) continue;
+    if (panel.classList.contains('docked-left')) reserve.left = Math.max(reserve.left, rect.right);
+    if (panel.classList.contains('docked-right')) reserve.right = Math.max(reserve.right, window.innerWidth - rect.left);
   }
-  return clampDockReserve(reserve);
+  return reserve;
 }
+
+const StableCanvas = memo(CanvasView);
+const StableToolbar = memo(Toolbar);
+const StableGroupManager = memo(GroupManager);
+const StablePointInfo = memo(PointInfoPanel);
+const StableEditing = memo(EditingPanel);
+const StableJournal = memo(OperationJournal);
 
 function normalizeAutosaveSettings(settings?: AutosaveSettingsPayload | null): Required<AutosaveSettingsPayload> {
   const interval = Number(settings?.intervalMinutes);
@@ -106,7 +78,7 @@ export default function App() {
     cancelNumberingLinkSelection,
     deleteSelectedNumberingManualLink,
     project,
-    groupManagerVisible,
+    groupManagerVisible, groupDetailsId,
     journalVisible,
     pointInfoVisible,
     editingPanelVisible,
@@ -118,6 +90,16 @@ export default function App() {
     vectorPathEditMode
   } = useProjectStore();
   const [pointer, setPointer] = useState({ x: 0, y: 0 });
+  const pointerFrame = useRef(0);
+  const pendingPointer = useRef(pointer);
+  const onPointerUpdate = useCallback((x: number, y: number) => {
+    pendingPointer.current = { x, y };
+    if (!pointerFrame.current) pointerFrame.current = requestAnimationFrame(() => {
+      pointerFrame.current = 0;
+      setPointer(pendingPointer.current);
+    });
+  }, []);
+  useEffect(() => () => cancelAnimationFrame(pointerFrame.current), []);
   const [size, setSize] = useState({ w: window.innerWidth, h: window.innerHeight });
   const [error, setError] = useState<string | null>(null);
   const [toolbarHeight, setToolbarHeight] = useState(loadToolbarHeight);
@@ -246,12 +228,18 @@ export default function App() {
 
   useEffect(() => {
     let rafId = 0;
+    const observedPanels = new Set<Element>();
+    const panelObserver = new ResizeObserver(() => refreshDockReserve());
 
     const refreshDockReserve = () => {
       if (rafId) window.cancelAnimationFrame(rafId);
       rafId = window.requestAnimationFrame(() => {
         rafId = 0;
-        setDockReserve(computeDockReserve());
+        const panels = new Set(document.querySelectorAll('.docked-panel'));
+        for (const panel of observedPanels) if (!panels.has(panel)) { panelObserver.unobserve(panel); observedPanels.delete(panel); }
+        for (const panel of panels) if (!observedPanels.has(panel)) { panelObserver.observe(panel); observedPanels.add(panel); }
+        const next = computeDockReserve();
+        setDockReserve(old => old.left === next.left && old.right === next.right ? old : next);
       });
     };
 
@@ -271,17 +259,18 @@ export default function App() {
 
     return () => {
       if (rafId) window.cancelAnimationFrame(rafId);
+      panelObserver.disconnect();
       window.removeEventListener('resize', onResize);
       window.removeEventListener('pile-numbering-panel-resized', refreshDockReserve as EventListener);
       window.removeEventListener('pile-numbering-dock-layout-changed', refreshDockReserve as EventListener);
     };
   }, []);
 
-  const workspaceWidth = Math.max(MIN_CANVAS_WIDTH_WHEN_DOCKED, size.w - dockReserve.left - dockReserve.right);
+  const workspaceWidth = Math.max(1, size.w - dockReserve.left - dockReserve.right);
   const canvasWidth = workspaceWidth;
   const canvasHeight = Math.max(300, size.h - toolbarHeight - STATUS_BAR_HEIGHT);
 
-  const handleCsvImport = async (file: File) => {
+  const handleCsvImport = useCallback(async (file: File) => {
     try {
       setError(null);
       const points = await importCsv(file);
@@ -290,11 +279,11 @@ export default function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Ошибка импорта CSV');
     }
-  };
+  }, [appendImportedPoints, canvasWidth, canvasHeight, zoomExtents]);
 
   return (
     <div className="app">
-      <Toolbar
+      <StableToolbar
         onCsvImport={handleCsvImport}
         canvasWidth={canvasWidth}
         canvasHeight={canvasHeight}
@@ -315,15 +304,15 @@ export default function App() {
           marginRight: 0
         }}
       >
-        <CanvasView width={canvasWidth} height={canvasHeight} onPointerUpdate={(x, y) => setPointer({ x, y })} />
+        <StableCanvas width={canvasWidth} height={canvasHeight} onPointerUpdate={onPointerUpdate} />
       </div>
-      {groupManagerVisible && <GroupManager toolbarHeight={toolbarHeight} statusBarHeight={STATUS_BAR_HEIGHT} />}
-      {editingPanelVisible && <EditingPanel toolbarHeight={toolbarHeight} statusBarHeight={STATUS_BAR_HEIGHT} />}
-      {journalVisible && <OperationJournal toolbarHeight={toolbarHeight} statusBarHeight={STATUS_BAR_HEIGHT} />}
-      {pointInfoVisible && <PointInfoPanel toolbarHeight={toolbarHeight} statusBarHeight={STATUS_BAR_HEIGHT} />}
+      {(groupManagerVisible || groupDetailsId) && <StableGroupManager toolbarHeight={toolbarHeight} statusBarHeight={STATUS_BAR_HEIGHT} />}
+      {editingPanelVisible && <StableEditing toolbarHeight={toolbarHeight} statusBarHeight={STATUS_BAR_HEIGHT} />}
+      {journalVisible && <StableJournal toolbarHeight={toolbarHeight} statusBarHeight={STATUS_BAR_HEIGHT} />}
+      {pointInfoVisible && <StablePointInfo toolbarHeight={toolbarHeight} statusBarHeight={STATUS_BAR_HEIGHT} />}
       <CadTooltip />
+      <CloseProjectGuard />
       <StatusBar x={pointer.x} y={pointer.y} zoom={project.viewSettings.zoom} pointsCount={project.points.length} />
     </div>
   );
 }
-

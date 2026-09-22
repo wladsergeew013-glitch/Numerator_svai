@@ -154,6 +154,10 @@ class ViewSettings(BaseModel):
     showPointNumbers: bool = True
     highlightUnnumbered: bool = True
     showNumberingPreview: bool = True
+    showGroupFlow: bool = False
+    showGroupNumbers: bool = False
+    groupOutlineDisplayVersion: int = 2
+    groupOutlineVisible: bool = False
     markerTextColor: str = "#ffffff"
     markerTextStrokeColor: str = '#020617'
     markerTextStrokeEnabled: bool = False
@@ -314,4 +318,3 @@ class UserConfig(BaseModel):
     commandIcons: dict[str, str] = Field(default_factory=dict)
     panels: dict[str, PanelStateConfig] = Field(default_factory=dict)
     autosaveSettings: AutosaveSettingsConfig = Field(default_factory=AutosaveSettingsConfig)
-

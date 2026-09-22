@@ -1,5 +1,7 @@
-import { type SyntheticEvent, useState } from 'react';
-import { useProjectStore } from '../store/useProjectStore';
+import { type SyntheticEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { suggestedAxisTolerance, useProjectStore } from '../store/useProjectStore';
+import { useShallow } from 'zustand/react/shallow';
+import { AutoClusterDialog } from './AutoClusterDialog';
 import {
   CAD_BASE_COLORS,
   DIRECTION_DESCRIPTIONS,
@@ -10,6 +12,7 @@ import {
   NumberingDirection,
   PileGroup
 } from '../types/project';
+import { NumberingMethodPreview } from './NumberingMethodPreview';
 import { DraggablePanel } from './DraggablePanel';
 
 interface Props {
@@ -31,8 +34,8 @@ interface CadConfirmState {
 }
 
 const METHOD_OPTIONS: Array<{ value: Exclude<NumberingMethod, 'manual'>; label: string }> = [
-  { value: 'rows', label: 'Ряды' },
-  { value: 'columns', label: 'Столбцы' },
+  { value: 'rows', label: 'Ряды → X' },
+  { value: 'columns', label: 'Столбцы ↕ Y' },
   { value: 'route', label: 'Маршрут' },
   { value: 'vector', label: 'Вектор' }
 ];
@@ -76,9 +79,9 @@ function methodPatch(nextMethod: Exclude<NumberingMethod, 'manual'>, currentDire
 function methodSummary(method: Exclude<NumberingMethod, 'manual'>) {
   switch (method) {
     case 'rows':
-      return 'Ряды используют допуск по Y и направление обхода рядов.';
+      return 'Номера идут вдоль X. Допуск по Y объединяет точки в горизонтальные ряды.';
     case 'columns':
-      return 'Столбцы используют допуск по X и направление обхода колонок.';
+      return 'Номера идут вдоль Y. Допуск по X объединяет точки в вертикальные столбцы.';
     case 'route':
       return 'Маршрут строит порядок по ближайшим точкам. Допуски рядов/колонок здесь не участвуют.';
     case 'vector':
@@ -145,8 +148,8 @@ function ColorSelector({ group }: { group: PileGroup }) {
 
 export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
   const {
-    project,
-    selectedGroupId,
+    points, groups, projectPipelines, numberingMode, showVectorPath,
+    selectedGroupId, groupManagerVisible, groupDetailsId, openGroupDetails, closeGroupDetails, applyRowsNumbering,
     selectedPipelineId,
     selectedPointIds,
     autoAssignSelection,
@@ -163,6 +166,7 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
     assignSelectionToGroup,
     toggleAutoAssignSelection,
     updateGroupName,
+    updateGroupOrder,
     updateGroupMeta,
     updateGroupNumbering,
     updateViewSettings,
@@ -182,9 +186,13 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
     toggleGroupManagerCollapsed,
     toggleGroupCollapsed,
     collapseAllGroups,
-    expandAllGroups,
-    autoClusterEditablePoints
-  } = useProjectStore();
+    expandAllGroups
+  } = useProjectStore(useShallow(state => ({
+    ...state, project: undefined,
+    points: state.project.points, groups: state.project.groups, projectPipelines: state.project.pipelines,
+    numberingMode: state.project.numberingMode, showVectorPath: state.project.viewSettings.showVectorPath
+  })));
+  const project = { points, groups, pipelines: projectPipelines, numberingMode, viewSettings: { showVectorPath } };
 
   const offsetTop = toolbarHeight;
   const offsetBottom = statusBarHeight;
@@ -195,15 +203,37 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
     .sort((a, b) => a.order - b.order);
   const activePipeline = pipelines.find((pipeline) => pipeline.id === activePipelineId) ?? pipelines[0] ?? null;
   const firstGroupIdInActivePipeline = visibleGroups[0]?.id ?? null;
-  const totalPointsInPipeline = project.points.filter((point) => visibleGroups.some((group) => group.id === point.groupId)).length;
+  const pointCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const point of points) if (point.groupId) counts.set(point.groupId, (counts.get(point.groupId) ?? 0) + 1);
+    return counts;
+  }, [points]);
+  const totalPointsInPipeline = visibleGroups.reduce((sum, group) => sum + (pointCounts.get(group.id) ?? 0), 0);
   const selectedPointsCount = selectedPointIds.length;
+  const groupListRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    groupListRef.current?.querySelector<HTMLElement>('[aria-pressed="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [selectedGroupId, selectedPipelineId]);
   const allVisibleGroupsCollapsed = visibleGroups.length > 0 && visibleGroups.every((group) => collapsedGroupIds.includes(group.id));
   const toggleVisibleGroupsCollapsed = () => {
     if (allVisibleGroupsCollapsed) expandAllGroups();
     else collapseAllGroups();
   };
   const [cadConfirm, setCadConfirm] = useState<CadConfirmState | null>(null);
+  const detailsGroup = groups.find(group => group.id === groupDetailsId);
+  const [numberingError, setNumberingError] = useState('');
+  const numberGroup = async (id: string) => {
+    setSelectedGroup(id);
+    try { setNumberingError(''); await applyRowsNumbering(); }
+    catch (error) { setNumberingError(error instanceof Error ? error.message : String(error)); }
+  };
+  const numberedCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const point of points) if (point.groupId && point.number != null && Number.isFinite(point.number)) counts.set(point.groupId, (counts.get(point.groupId) ?? 0) + 1);
+    return counts;
+  }, [points]);
   const [pipelineMenuOpen, setPipelineMenuOpen] = useState(false);
+  const [autoClusterOpen, setAutoClusterOpen] = useState(false);
 
   const askDeleteGroup = (group: PileGroup, pointsCount: number) => {
     setCadConfirm({
@@ -216,21 +246,7 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
     });
   };
 
-  const askAutoCluster = () => {
-    const selectedCount = project.points.filter((point) => selectedPointIds.includes(point.id)).length;
-    setCadConfirm({
-      title: 'Автокластеризация',
-      message: selectedCount >= 2
-        ? 'Автоматически разбить выделенные точки на группы?'
-        : 'Автоматически пересобрать все незаблокированные точки в группы?',
-      details: selectedCount >= 2
-        ? `Точек в выделении: ${selectedCount}. Старые группы выбранных точек будут пересобраны.`
-        : 'Заблокированные группы не будут изменены. Текущие редактируемые группы будут пересобраны. Операцию можно откатить через Ctrl+Z.',
-      confirmLabel: 'Авторазбить',
-      danger: true,
-      onConfirm: autoClusterEditablePoints
-    });
-  };
+  const askAutoCluster = () => setAutoClusterOpen(true);
 
   const handleAssignCommand = () => {
     if (selectedPointIds.length > 0) {
@@ -240,203 +256,27 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
     toggleAutoAssignSelection();
   };
 
-  if (groupManagerCollapsed) {
-    const selected = project.groups.find((g) => g.id === selectedGroupId);
-    return (
-      <DraggablePanel
-        id="group-manager-collapsed"
-        title="Группы"
-        initialX={12}
-        initialY={offsetTop + 10}
-        width={130}
-        height={160}
-        minWidth={120}
-        minHeight={130}
-        onClose={toggleGroupManager}
-        actions={<button className="btn small" onClick={toggleGroupManagerCollapsed}>▣</button>}
-      >
-        <div className="collapsed-panel-body">
-          <div className="collapsed-active-color" style={{ backgroundColor: selected?.color ?? '#475569' }} title={selected?.name ?? 'Группа не выбрана'} />
-          <div className="collapsed-caption">{selected?.name ?? 'Нет группы'}</div>
-        </div>
-      </DraggablePanel>
-    );
-  }
-
-  return (
-    <DraggablePanel
-      id="group-manager"
-      title="Диспетчер групп"
-      initialX={12}
-      initialY={offsetTop + 10}
-      width={840}
-      height={720}
-      minWidth={640}
-      minHeight={420}
-      onClose={toggleGroupManager}
-      className="group-manager-panel"
-      dockable
-      dock={groupManagerDock}
-      onDockChange={setGroupManagerDock}
-      dockOffsetTop={offsetTop}
-      dockOffsetBottom={offsetBottom}
-      actions={<button className="btn small" onClick={toggleGroupManagerCollapsed}>_</button>}
-    >
-      <div className="group-manager-content group-manager-content-v32">
-        <div className="group-manager-header-grid">
-          <section className="manager-section pipeline-section">
-            <div className="manager-section-head">
-              <div>
-                <strong>Пайплайны</strong>
-                <span>Выбери активную цепочку из списка</span>
-              </div>
-            </div>
-
-            <div className="pipeline-picker-row">
-              <div className="pipeline-dropdown-wrap" onClick={stop} onMouseDown={stop}>
-                <button
-                  className={`pipeline-dropdown-button ${pipelineMenuOpen ? 'open' : ''}`}
-                  type="button"
-                  onClick={() => setPipelineMenuOpen((value) => !value)}
-                  title="Выбрать активный пайплайн"
-                >
-                  <span className="pipeline-index-chip">{pipelineShortLabel(activePipeline?.name, activePipeline?.order ?? 1)}</span>
-                  <span className="pipeline-name-label">{activePipeline?.name ?? 'Пайплайн'}</span>
-                  <em>{visibleGroups.length} групп</em>
-                  <b>▾</b>
-                </button>
-                {pipelineMenuOpen && (
-                  <div className="pipeline-dropdown-menu">
-                    {pipelines.map((pipeline) => {
-                      const groupCount = project.groups.filter((group) => (group.pipelineId ?? pipelines[0]?.id ?? null) === pipeline.id).length;
-                      const active = pipeline.id === activePipelineId;
-                      return (
-                        <button
-                          key={pipeline.id}
-                          className={`pipeline-dropdown-item ${active ? 'active' : ''}`}
-                          type="button"
-                          onClick={() => {
-                            setSelectedPipeline(pipeline.id);
-                            setPipelineMenuOpen(false);
-                          }}
-                        >
-                          <span className="pipeline-index-chip">{pipelineShortLabel(pipeline.name, pipeline.order)}</span>
-                          <span className="pipeline-name-label">{pipeline.name}</span>
-                          <em>{groupCount} групп</em>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-              <button className="btn small" type="button" onClick={() => { createPipeline(); setPipelineMenuOpen(false); }} title="Добавить пайплайн">＋</button>
-              <button className="btn small danger" disabled={!activePipeline || pipelines.length <= 1} onClick={() => { if (activePipeline) deletePipeline(activePipeline.id); setPipelineMenuOpen(false); }}>Удалить</button>
-            </div>
-          </section>
-
-          <section className="manager-section manager-actions-section">
-            <div className="manager-section-head">
-              <div>
-                <strong>Действия</strong>
-                <span>Для активного пайплайна</span>
-              </div>
-            </div>
-
-            <div className="manager-action-grid">
-              <button
-                className="btn manager-action-button manager-action-create"
-                data-tooltip="Создаёт новую группу в активном пайплайне и назначает ей первый свободный базовый CAD-цвет."
-                onClick={createGroup}
-              >
-                <span className="manager-action-icon">✚</span>
-                <span className="manager-action-text">Создать группу</span>
-              </button>
-              <button
-                className={`btn manager-action-button manager-assign-button ${autoAssignSelection ? 'active' : ''}`}
-                data-tooltip={selectedPointIds.length > 0
-                  ? 'Назначить выделение\nНазначает выбранные точки в активную группу один раз. Состояние автоназначения рамкой не меняет.'
-                  : `Назначить рамкой\n${autoAssignSelection ? 'Включено: выделение рамкой автоматически назначается активной группе.' : 'Выключено: нажми, чтобы включить автоназначение рамкой.'}`}
-                onClick={handleAssignCommand}
-              >
-                <span className="manager-action-icon">{autoAssignSelection ? '☑' : '☐'}</span>
-                <span className="manager-action-text">Назначить</span>
-              </button>
-              <button
-                className="btn manager-action-button manager-action-auto"
-                disabled={project.points.length < 2}
-                data-tooltip={'Авторазбить точки\nЕсли есть выделение из 2+ редактируемых точек — разбивает выделение. Если выделения нет — пересобирает все незаблокированные точки. Заблокированные группы не трогаются, откат доступен через Ctrl+Z.'}
-                onClick={askAutoCluster}
-              >
-                <span className="manager-action-icon">✦</span>
-                <span className="manager-action-text">Авторазбить</span>
-              </button>
-            </div>
-
-            <div className="manager-status-grid">
-              <span>Групп: <b>{visibleGroups.length}</b></span>
-              <span>Точек: <b>{totalPointsInPipeline}</b></span>
-              <span>Выбрано: <b>{selectedPointsCount}</b></span>
-            </div>
-          </section>
-        </div>
-
-        <section className="manager-section group-list-section">
-          <div className="manager-section-head group-list-head">
-            <div>
-              <strong>Группы пайплайна</strong>
-              <span>{activePipeline?.name ?? 'Пайплайн'} · порядок сверху вниз задаёт цепочку нумерации</span>
-            </div>
-            <button
-              className="btn small group-list-view-toggle"
-              disabled={visibleGroups.length === 0}
-              data-tooltip={allVisibleGroupsCollapsed ? 'Развернуть карточки групп текущего пайплайна' : 'Свернуть карточки групп текущего пайплайна'}
-              onClick={toggleVisibleGroupsCollapsed}
-            >
-              {allVisibleGroupsCollapsed ? '▾ Развернуть' : '▸ Свернуть'}
-            </button>
-          </div>
-
-          <div className="group-list-v32">
-            {visibleGroups.length === 0 && (
-              <div className="empty-message">В этом пайплайне пока нет групп. Создай группу или запусти автокластеризацию.</div>
-            )}
-
-            {visibleGroups.map((g, index) => {
-              const count = project.points.filter((p) => p.groupId === g.id).length;
-              const collapsed = collapsedGroupIds.includes(g.id);
-              const active = selectedGroupId === g.id;
-              const method = normalizeMethod(g.numbering.method);
-              const clusterNumbering = metaBoolean(g.meta?.clusterNumbering);
-              const clusterPrefix = metaPositiveNumber(g.meta?.clusterPrefix, index + 1);
-              const methodLabel = String(NUMBERING_METHOD_LABELS[method] ?? method);
-              return (
-                <div key={g.id} className={`group-card group-card-v32 ${active ? 'active' : ''} ${collapsed ? 'collapsed-card' : ''} ${g.locked ? 'locked' : ''}`} onClick={() => setSelectedGroup(g.id)}>
-                  <div className="group-card-top group-card-top-v32">
-                    <button className="collapse-button" onClick={(e) => { stop(e); toggleGroupCollapsed(g.id); }}>{collapsed ? '▸' : '▾'}</button>
-                    <ColorSelector group={g} />
-                    <span className="group-order-chip">{index + 1}</span>
-                    <div className="group-title-block">
-                      <div className="group-name-line">{g.name}</div>
-                      <div className="group-meta-line">{methodLabel} · {count} точек</div>
-                    </div>
-                    <div className="group-order-quick" onClick={stop} onMouseDown={stop}>
-                      <button className="btn small" data-tooltip="Поднять группу выше в текущем пайплайне" disabled={index === 0} onClick={() => moveGroup(g.id, -1)}>↑</button>
-                      <button className="btn small" data-tooltip="Опустить группу ниже в текущем пайплайне" disabled={index === visibleGroups.length - 1} onClick={() => moveGroup(g.id, 1)}>↓</button>
-                    </div>
-                    {active && <span className="active-badge">Активная</span>}
-                    {clusterNumbering && <span className="active-badge">Кластер {clusterPrefix}</span>}
-                    {g.locked && <span className="active-badge warning">Блок</span>}
-                    <button className="btn small" data-tooltip={g.locked ? 'Разблокировать группу' : 'Заблокировать группу: точки, связи и нумерация группы не меняются'} onClick={(e) => { stop(e); toggleGroupLocked(g.id); }}>{g.locked ? '🔒' : '🔓'}</button>
-                    <button className="btn small danger group-delete-quick" disabled={g.locked} data-tooltip={g.locked ? 'Заблокированную группу удалить нельзя' : 'Удалить группу. Точки останутся в проекте без группы.'} onClick={(e) => { stop(e); askDeleteGroup(g, count); }}>×</button>
-                    <span className="badge">{count}</span>
-                  </div>
-
-                  {collapsed ? null : (
-                    <div className="group-card-body group-card-body-v32" onClick={stop} onMouseDown={stop}>
+  const renderGroupSettings = (g: PileGroup, index: number) => {
+    const groupPoints = project.points.filter((p) => p.groupId === g.id);
+    const count = groupPoints.length;
+    const active = selectedGroupId === g.id;
+    const method = normalizeMethod(g.numbering.method);
+    const clusterNumbering = metaBoolean(g.meta?.clusterNumbering);
+    const clusterPrefix = metaPositiveNumber(g.meta?.clusterPrefix, index + 1);
+    const coordinates = groupPoints.map((p) => method === 'rows' ? p.y : p.x);
+    const span = count ? Math.max(...coordinates) - Math.min(...coordinates) : 0;
+    const toleranceTooLarge = span > 0 && (method === 'rows' ? g.numbering.rowTolerance : g.numbering.columnTolerance) >= span;
+    return (<div className="group-card-body group-card-body-v32" onClick={stop} onMouseDown={stop}>
                       <div className="group-settings-grid">
                         <div className="field-row">
-                          <label>Имя</label>
-                          <input value={g.name} disabled={g.locked} onChange={(e) => updateGroupName(g.id, e.target.value)} />
+                          <label>Название группы</label>
+                          <input aria-label="Название группы" value={g.name} disabled={g.locked} onChange={(e) => updateGroupName(g.id, e.target.value)} />
+                        </div>
+                        <div className="field-row">
+                          <label>Порядок нумерации</label>
+                          <input key={`${g.id}:${g.order}`} aria-label="Порядок нумерации группы" type="number" min={1} max={visibleGroups.length} defaultValue={g.order} disabled={g.locked}
+                            onBlur={e => { const value = Number(e.target.value); if (e.target.value && Number.isFinite(value)) updateGroupOrder(g.id, value); e.target.value = String(useProjectStore.getState().project.groups.find(item => item.id === g.id)?.order ?? g.order); }}
+                            onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
                         </div>
 
                         <label className="auto-assign-row compact cluster-toggle-row tooltip" data-tooltip="Кластерная группа\nНумерация внутри группы начинается с 1, а итоговый номер получает числовой префикс кластера. Например: префикс 2 и локальный номер 13 дают 213.">
@@ -481,25 +321,32 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
                           </div>
                         )}
 
-                        <div className="field-row">
-                          <label className="tooltip" data-tooltip={`Метод нумерации\n${NUMBERING_METHOD_DESCRIPTIONS[method]}`}>Метод</label>
-                          <select
-                            value={method}
-                            disabled={g.locked}
-                            onChange={(e) => updateGroupNumbering(g.id, methodPatch(e.target.value as Exclude<NumberingMethod, 'manual'>, g.numbering.direction))}
-                          >
-                            {METHOD_OPTIONS.map((option) => (
-                              <option key={option.value} value={option.value}>{option.label}</option>
-                            ))}
-                          </select>
+                        <div className="method-picker" role="group" aria-label="Метод нумерации">
+                          {METHOD_OPTIONS.map((option) => <button key={option.value} type="button"
+                            className={`method-choice ${method === option.value ? 'selected' : ''}`}
+                            disabled={g.locked} aria-pressed={method === option.value}
+                            data-tooltip={NUMBERING_METHOD_DESCRIPTIONS[option.value]}
+                            onClick={() => updateGroupNumbering(g.id, methodPatch(option.value, g.numbering.direction))}>
+                            <NumberingMethodPreview method={option.value} />
+                            <span>{option.label}</span>
+                          </button>)}
                         </div>
 
                         <div className="field-help compact group-method-note">{methodSummary(method)}</div>
 
+                        {(method === 'rows' || method === 'columns') && <div className="axis-tolerance-help">
+                          <button className="btn small" disabled={g.locked || count < 2}
+                            data-tooltip="Подбирает допуск по шагу точек этой группы. Номера изменятся после команды нумерации."
+                            onClick={() => updateGroupNumbering(g.id, method === 'rows'
+                              ? { rowTolerance: suggestedAxisTolerance(groupPoints) }
+                              : { columnTolerance: suggestedAxisTolerance(groupPoints) })}>Подобрать допуск</button>
+                          {toleranceTooLarge && <span role="status">Допуск объединяет всё поле в {method === 'rows' ? 'один ряд' : 'один столбец'}. Уменьшите его.</span>}
+                        </div>}
+
                         {method === 'rows' && (
                           <>
                             <div className="field-row">
-                              <label className="tooltip" data-tooltip="Допуск рядов — максимальная разница по Y, при которой точки считаются одним рядом. Для столбцов, маршрута и вектора не используется.">Допуск рядов</label>
+                              <label className="tooltip" data-tooltip="Допуск рядов — максимальная разница по Y, при которой точки считаются одним рядом. Для столбцов, маршрута и вектора не используется.">Допуск по Y</label>
                               <input
                                 type="number"
                                 disabled={g.locked}
@@ -526,7 +373,7 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
                         {method === 'columns' && (
                           <>
                             <div className="field-row">
-                              <label className="tooltip" data-tooltip="Допуск колонок — максимальная разница по X, при которой точки считаются одной колонкой. Для рядов, маршрута и вектора не используется.">Допуск колонок</label>
+                              <label className="tooltip" data-tooltip="Допуск колонок — максимальная разница по X, при которой точки считаются одной колонкой. Для рядов, маршрута и вектора не используется.">Допуск по X</label>
                               <input
                                 type="number"
                                 disabled={g.locked}
@@ -649,15 +496,219 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
                         <button className="btn small" disabled={g.locked} onClick={() => clearManualNumbersForGroup(g.id)}>Снять ручные</button>
                         <button className="btn small danger" disabled={g.locked} onClick={() => askDeleteGroup(g, count)}>Удалить</button>
                       </div>
+                    </div>);
+  };
+
+  const renderCollapsedPanel = () => {
+    const selected = project.groups.find((g) => g.id === selectedGroupId);
+    return (
+      <DraggablePanel
+        key="group-manager-collapsed"
+        id="group-manager-collapsed"
+        title="Группы"
+        initialX={12}
+        initialY={offsetTop + 10}
+        width={130}
+        height={160}
+        minWidth={120}
+        minHeight={130}
+        onClose={toggleGroupManager}
+        actions={<button className="btn small" onClick={toggleGroupManagerCollapsed}>▣</button>}
+      >
+        <div className="collapsed-panel-body">
+          <div className="collapsed-active-color" style={{ backgroundColor: selected?.color ?? '#475569' }} title={selected?.name ?? 'Группа не выбрана'} />
+          <div className="collapsed-caption">{selected?.name ?? 'Нет группы'}</div>
+        </div>
+      </DraggablePanel>
+    );
+  };
+
+  return (<>
+    {groupManagerVisible && (groupManagerCollapsed ? renderCollapsedPanel() : <DraggablePanel
+      key="group-manager"
+      id="group-manager"
+      title="Диспетчер групп"
+      initialX={12}
+      initialY={offsetTop + 10}
+      width={780}
+      height={720}
+      minWidth={420}
+      minHeight={420}
+      onClose={toggleGroupManager}
+      className="group-manager-panel"
+      dockable
+      dock={groupManagerDock}
+      onDockChange={setGroupManagerDock}
+      dockOffsetTop={offsetTop}
+      dockOffsetBottom={offsetBottom}
+      actions={<button className="btn small" onClick={toggleGroupManagerCollapsed}>_</button>}
+    >
+      <div className="group-manager-content group-manager-content-v32 group-manager-compact">
+        <div className="group-manager-header-grid">
+          <section className="manager-section pipeline-section">
+            <div className="manager-section-head">
+              <div>
+                <strong>Пайплайны</strong>
+                <span>Выбери активную цепочку из списка</span>
+              </div>
+            </div>
+
+            <div className="pipeline-picker-row">
+              <div className="pipeline-dropdown-wrap" onClick={stop} onMouseDown={stop}>
+                <button
+                  className={`pipeline-dropdown-button ${pipelineMenuOpen ? 'open' : ''}`}
+                  type="button"
+                  onClick={() => setPipelineMenuOpen((value) => !value)}
+                  title="Выбрать активный пайплайн"
+                >
+                  <span className="pipeline-index-chip">{pipelineShortLabel(activePipeline?.name, activePipeline?.order ?? 1)}</span>
+                  <span className="pipeline-name-label">{activePipeline?.name ?? 'Пайплайн'}</span>
+                  <em>{visibleGroups.length} групп</em>
+                  <b>▾</b>
+                </button>
+                {pipelineMenuOpen && (
+                  <div className="pipeline-dropdown-menu">
+                    {pipelines.map((pipeline) => {
+                      const groupCount = project.groups.filter((group) => (group.pipelineId ?? pipelines[0]?.id ?? null) === pipeline.id).length;
+                      const active = pipeline.id === activePipelineId;
+                      return (
+                        <button
+                          key={pipeline.id}
+                          className={`pipeline-dropdown-item ${active ? 'active' : ''}`}
+                          type="button"
+                          onClick={() => {
+                            setSelectedPipeline(pipeline.id);
+                            setPipelineMenuOpen(false);
+                          }}
+                        >
+                          <span className="pipeline-index-chip">{pipelineShortLabel(pipeline.name, pipeline.order)}</span>
+                          <span className="pipeline-name-label">{pipeline.name}</span>
+                          <em>{groupCount} групп</em>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              <button className="btn small" type="button" onClick={() => { createPipeline(); setPipelineMenuOpen(false); }} title="Добавить пайплайн">＋</button>
+              <button className="btn small danger" disabled={!activePipeline || pipelines.length <= 1} onClick={() => { if (activePipeline) deletePipeline(activePipeline.id); setPipelineMenuOpen(false); }}>Удалить</button>
+            </div>
+          </section>
+
+          <section className="manager-section manager-actions-section">
+            <div className="manager-section-head">
+              <div>
+                <strong>Действия</strong>
+                <span>Для активного пайплайна</span>
+              </div>
+            </div>
+
+            <div className="manager-action-grid">
+              <button
+                className="btn manager-action-button manager-action-create"
+                data-tooltip="Создаёт новую группу в активном пайплайне и назначает ей первый свободный базовый CAD-цвет."
+                onClick={createGroup}
+              >
+                <span className="manager-action-icon">✚</span>
+                <span className="manager-action-text">Создать группу</span>
+              </button>
+              <button
+                className={`btn manager-action-button manager-assign-button ${autoAssignSelection ? 'active' : ''}`}
+                data-tooltip={selectedPointIds.length > 0
+                  ? 'Назначить выделение\nНазначает выбранные точки в активную группу один раз. Состояние автоназначения рамкой не меняет.'
+                  : `Назначить рамкой\n${autoAssignSelection ? 'Включено: выделение рамкой автоматически назначается активной группе.' : 'Выключено: нажми, чтобы включить автоназначение рамкой.'}`}
+                onClick={handleAssignCommand}
+              >
+                <span className="manager-action-icon">{autoAssignSelection ? '☑' : '☐'}</span>
+                <span className="manager-action-text">Назначить</span>
+              </button>
+              <button
+                className="btn manager-action-button manager-action-auto"
+                disabled={project.points.length < 2}
+                data-tooltip={'Авторазбить точки\nЕсли есть выделение из 2+ редактируемых точек — разбивает выделение. Если выделения нет — пересобирает все незаблокированные точки. Заблокированные группы не трогаются, откат доступен через Ctrl+Z.'}
+                onClick={() => askAutoCluster()}
+              >
+                <span className="manager-action-icon">✦</span>
+                <span className="manager-action-text">Авторазбить</span>
+              </button>
+            </div>
+
+            <div className="manager-status-grid">
+              <span>Групп: <b>{visibleGroups.length}</b></span>
+              <span>Точек: <b>{totalPointsInPipeline}</b></span>
+              <span>Выбрано: <b>{selectedPointsCount}</b></span>
+            </div>
+          </section>
+        </div>
+
+        <section className="manager-section group-list-section">
+          <div className="manager-section-head group-list-head">
+            <div>
+              <strong>Группы пайплайна</strong>
+              <span>{activePipeline?.name ?? 'Пайплайн'} · порядок сверху вниз задаёт цепочку нумерации</span>
+            </div>
+            <button className="btn small" disabled={!selectedGroupId} onClick={() => selectedGroupId && openGroupDetails(selectedGroupId)}>ⓘ О группе</button>
+          </div>
+
+          <div className="group-list-help">Клик — выбрать / снять выбор. Двойной клик — сведения и настройки.</div>
+          {numberingError && <div role="alert">{numberingError}</div>}
+          <div className="group-manager-workspace">
+          <div ref={groupListRef} className="group-list-v32" aria-label="Список групп">
+            {visibleGroups.length === 0 && (
+              <div className="empty-message">В этом пайплайне пока нет групп. Создай группу или запусти автокластеризацию.</div>
+            )}
+
+            {visibleGroups.map((g, index) => {
+              const count = pointCounts.get(g.id) ?? 0;
+              const numbered = numberedCounts.get(g.id) ?? 0;
+              const status = count === 0 ? 'empty' : numbered === count ? 'done' : numbered ? 'partial' : 'pending';
+              const statusText = count === 0 ? 'Нет точек' : numbered === count ? 'Пронумеровано' : numbered ? `Пронумеровано ${numbered} из ${count}` : 'Без номеров';
+              const collapsed = collapsedGroupIds.includes(g.id);
+              const active = selectedGroupId === g.id;
+              const method = normalizeMethod(g.numbering.method);
+              const clusterNumbering = metaBoolean(g.meta?.clusterNumbering);
+              const clusterPrefix = metaPositiveNumber(g.meta?.clusterPrefix, index + 1);
+              const methodLabel = String(NUMBERING_METHOD_LABELS[method] ?? method);
+              return (
+                <div key={g.id} className={`group-card group-card-v32 ${active ? 'active' : ''} ${collapsed ? 'collapsed-card' : ''} ${g.locked ? 'locked' : ''}`} onClick={(e) => { if (e.detail < 2) setSelectedGroup(active ? null : g.id); }} onDoubleClick={() => openGroupDetails(g.id)}>
+                  <div className="group-card-top group-card-top-v32">
+                    <span className={`group-numbering-status ${status}`} title={statusText} aria-label={statusText}>{status === 'done' ? '✓' : status === 'partial' ? '◐' : status === 'empty' ? '—' : '○'}</span>
+                    <ColorSelector group={g} />
+                    <span className="group-order-chip">{index + 1}</span>
+                    <button className="group-title-block group-select-button" aria-pressed={active} data-tooltip={`Настройки группы ${g.name}`} onClick={(e) => { stop(e); if (e.detail < 2) setSelectedGroup(active ? null : g.id); }} onDoubleClick={(e) => { stop(e); openGroupDetails(g.id); }}>
+                      <div className="group-name-line">{g.name}</div>
+                      <div className="group-meta-line">{methodLabel} · {numbered}/{count} с номером</div>
+                    </button>
+                    <div className="group-order-quick" onClick={stop} onMouseDown={stop}>
+                      <button className="btn small" data-tooltip="Поднять группу выше в текущем пайплайне" disabled={index === 0} onClick={() => moveGroup(g.id, -1)}>↑</button>
+                      <button className="btn small" data-tooltip="Опустить группу ниже в текущем пайплайне" disabled={index === visibleGroups.length - 1} onClick={() => moveGroup(g.id, 1)}>↓</button>
                     </div>
-                  )}
+                    {active && <span className="active-badge">Активная</span>}
+                    {clusterNumbering && <span className="active-badge">Кластер {clusterPrefix}</span>}
+                    {g.locked && <span className="active-badge warning">Блок</span>}
+                    <button className="btn small" data-tooltip={g.locked ? 'Разблокировать группу' : 'Заблокировать группу: точки, связи и нумерация группы не меняются'} onClick={(e) => { stop(e); toggleGroupLocked(g.id); }}>{g.locked ? '🔒' : '🔓'}</button>
+                    <button className="btn small danger group-delete-quick" disabled={g.locked} data-tooltip={g.locked ? 'Заблокированную группу удалить нельзя' : 'Удалить группу. Точки останутся в проекте без группы.'} onClick={(e) => { stop(e); askDeleteGroup(g, count); }}>×</button>
+                    <button className="btn small" disabled={g.locked || count === 0} aria-label={`Пронумеровать ${g.name}`} data-tooltip="Пронумеровать эту группу по её настройкам" onClick={(e) => { stop(e); void numberGroup(g.id); }}>№</button>
+                    <button className="btn small" aria-label={`О группе ${g.name}`} data-tooltip="О группе: сведения и настройки" onClick={(e) => { stop(e); openGroupDetails(g.id); }}>ⓘ</button>
+                  </div>
+
+
                 </div>
               );
             })}
           </div>
+          </div>
         </section>
       </div>
 
+    </DraggablePanel>)}
+    {detailsGroup && <DraggablePanel id="group-details" title={`О группе · ${detailsGroup.name}`} initialX={Math.max(24, window.innerWidth - 610)} initialY={offsetTop + 20} width={560} height={Math.max(320, Math.min(620, window.innerHeight - offsetTop - offsetBottom - 30))} minWidth={400} minHeight={320} dockable dockOffsetTop={offsetTop} dockOffsetBottom={offsetBottom} className="group-details-panel" onClose={closeGroupDetails}>
+      <div className="group-details-summary"><span>Позиция: {detailsGroup.order}</span><span>Точек: {pointCounts.get(detailsGroup.id) ?? 0}</span><span>С номером: {numberedCounts.get(detailsGroup.id) ?? 0}</span></div>
+      <button className="btn primary" disabled={detailsGroup.locked || !pointCounts.get(detailsGroup.id)} onClick={() => void numberGroup(detailsGroup.id)}>Пронумеровать группу</button>
+      {numberingError && <div role="alert">{numberingError}</div>}
+      {renderGroupSettings(detailsGroup, detailsGroup.order - 1)}
+    </DraggablePanel>}
+      {autoClusterOpen && <AutoClusterDialog onClose={() => setAutoClusterOpen(false)} />}
       {cadConfirm && (
         <div className="cad-confirm-backdrop" onClick={() => setCadConfirm(null)} onMouseDown={stop}>
           <div className="cad-confirm-dialog" onClick={stop} onMouseDown={stop}>
@@ -680,6 +731,6 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
           </div>
         </div>
       )}
-    </DraggablePanel>
+    </>
   );
 }

@@ -9,7 +9,7 @@ interface TooltipState {
 }
 
 function findTooltipTarget(target: EventTarget | null): HTMLElement | null {
-  if (!(target instanceof HTMLElement)) return null;
+  if (!(target instanceof Element)) return null;
   return target.closest('[data-tooltip]') as HTMLElement | null;
 }
 
@@ -57,8 +57,11 @@ export function CadTooltip() {
       hide();
     };
 
+    const onFocus = (event: FocusEvent) => { const target = findTooltipTarget(event.target); if (target) show(target); };
     const onScrollOrClick = () => hide();
 
+    document.addEventListener('focusin', onFocus);
+    document.addEventListener('focusout', onScrollOrClick);
     document.addEventListener('mouseover', onMouseOver);
     document.addEventListener('mouseout', onMouseOut);
     document.addEventListener('mousedown', onScrollOrClick, true);
@@ -67,6 +70,8 @@ export function CadTooltip() {
 
     return () => {
       hide();
+      document.removeEventListener('focusin', onFocus);
+      document.removeEventListener('focusout', onScrollOrClick);
       document.removeEventListener('mouseover', onMouseOver);
       document.removeEventListener('mouseout', onMouseOut);
       document.removeEventListener('mousedown', onScrollOrClick, true);
@@ -79,6 +84,7 @@ export function CadTooltip() {
 
   return (
     <div
+      role="tooltip"
       className={`cad-tooltip cad-tooltip-${tooltip.placement}`}
       style={{ left: tooltip.left, top: tooltip.top, width: tooltip.width }}
     >

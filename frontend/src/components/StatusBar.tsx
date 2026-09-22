@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useProjectStore } from '../store/useProjectStore';
 
 interface Props {
@@ -10,7 +11,7 @@ interface Props {
 export function StatusBar({ x, y, zoom, pointsCount }: Props) {
   const { selectedPointIds, selectedGroupId, project, pointInfoVisible, editingTool, editPointPickMode, numberingPickMode, numberingPreview } = useProjectStore();
   const group = project.groups.find((g) => g.id === selectedGroupId);
-  const noNumberCount = project.points.filter((p) => p.number == null).length;
+  const noNumberCount = useMemo(() => project.points.reduce((count, point) => count + (point.number == null ? 1 : 0), 0), [project.points]);
   const mode =
     numberingPickMode === 'group_start' ? 'Нумерация: выбрать старт'
     : numberingPickMode === 'group_end' ? 'Нумерация: выбрать финиш'

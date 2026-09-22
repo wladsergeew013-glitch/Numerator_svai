@@ -12,10 +12,12 @@ from pathlib import Path
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, Field
+from app import cad_operations as cad
 
 from app.io_project import import_points_from_csv
 from app.numbering_rows import apply_numbering_rows
+from app.clustering_methods import ClusterPreviewRequest, preview_clusters
 from app.schemas import (
     CsvImportResponse,
     LocalProjectInfo,
@@ -31,6 +33,14 @@ from app.schemas import (
 )
 
 app = FastAPI(title="Pile Numbering API", version="0.3.0")
+
+
+@app.post('/api/clustering/preview')
+def clustering_preview(request: ClusterPreviewRequest):
+    try:
+        return preview_clusters(request)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 app.add_middleware(
     CORSMiddleware,
@@ -127,6 +137,8 @@ def _log_backend_error(context: str, exc: Exception | None = None, extra: dict |
         payload["exceptionType"] = type(exc).__name__
         payload["exception"] = str(exc)
         payload["traceback"] = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    if 'operationId' not in (extra or {}):
+        cad.record(context, payload, level)
     logger.log(level, json.dumps(payload, ensure_ascii=False, default=str))
     return str(log_path)
 
@@ -500,6 +512,7 @@ def numbering_rows(request: NumberingRowsRequest) -> NumberingResponse:
 # ============================================================
 
 class NanoCadBlockImportRequest(BaseModel):
+    scope: str = Field(default='auto', pattern='^(auto|selection|all)$')
     blockName: str
     numberAttribute: str | None = None
     baseX: float = 0.0
@@ -508,6 +521,7 @@ class NanoCadBlockImportRequest(BaseModel):
 
 
 class NanoCadExportPoint(BaseModel):
+    meta: dict = Field(default_factory=dict)
     id: str | None = None
     x: float
     y: float
@@ -517,6 +531,7 @@ class NanoCadExportPoint(BaseModel):
 
 
 class NanoCadBlockExportRequest(BaseModel):
+    scope: str = Field(default='auto', pattern='^(auto|selection|all)$')
     blockName: str
     numberAttribute: str
     points: list[NanoCadExportPoint]
@@ -527,6 +542,8 @@ class NanoCadBlockExportRequest(BaseModel):
 
 
 class NanoCadModelStudioImportRequest(BaseModel):
+    scope: str = Field(default='auto', pattern='^(auto|selection|all)$')
+    preserveHandles: bool = True
     objectName: str | None = None
     selectedObjectNames: list[str] | None = None
     selectedObjectParameters: dict[str, str] | None = None
@@ -537,6 +554,9 @@ class NanoCadModelStudioImportRequest(BaseModel):
 
 
 class NanoCadModelStudioExportRequest(BaseModel):
+    saveDrawing: bool = False
+    scope: str = Field(default='auto', pattern='^(auto|selection|all)$')
+    matchMode: str = Field(default='auto', pattern='^(auto|coordinates|handles)$')
     objectName: str | None = None
     selectedObjectNames: list[str] | None = None
     numberParameter: str
@@ -545,6 +565,36 @@ class NanoCadModelStudioExportRequest(BaseModel):
     baseY: float = 0.0
     tolerance: float = 1.0
     selectedGroupIds: list[str] | None = None
+
+
+cad.log_event = _log_backend_error
+
+
+def _raise_if_cad_disconnected(exc):
+    if getattr(exc, 'hresult', None) in (-2147023174, -2147023170, -2147417848):
+        raise exc
+
+
+def _cad_scope(doc, model_space, scope='auto'):
+    if scope not in ('auto', 'selection', 'all'):
+        raise HTTPException(422, 'Неизвестная область сканирования.')
+    if scope == 'all':
+        cad.emit('cad_scope', scope='all', count=int(model_space.Count))
+        return model_space, 'all'
+    try:
+        selected = doc.PickfirstSelectionSet
+        count = int(selected.Count)
+    except Exception as exc:
+        _raise_if_cad_disconnected(exc)
+        # Do not silently scan/write the whole drawing when selection cannot be read.
+        raise HTTPException(409, 'nanoCAD не предоставил текущее выделение. Выберите явно «Весь чертёж» или проверьте выделение в nanoCAD.') from exc
+    if count:
+        cad.emit('cad_scope', scope='selection', count=count)
+        return selected, 'selection'
+    if scope == 'selection':
+        raise HTTPException(400, 'В nanoCAD ничего не выделено. Выделите объекты или выберите весь чертёж.')
+    cad.emit('cad_scope', scope='all', count=int(model_space.Count))
+    return model_space, 'all'
 
 
 def _coerce_float_triplet(value) -> tuple[float, float, float] | None:
@@ -689,7 +739,6 @@ def _connect_nanocad():
             detail="nanoCAD COM integration requires Windows and pywin32. Run: backend\\.venv\\Scripts\\python.exe -m pip install pywin32",
         ) from exc
 
-    pythoncom.CoInitialize()
     last_error: Exception | None = None
 
     for progid in _nanocad_progid_candidates():
@@ -850,7 +899,8 @@ def _find_nearest_export_point(x: float, y: float, points: list[NanoCadExportPoi
 def _has_modelstudio_element(entity) -> bool:
     try:
         return getattr(entity, 'Element') is not None
-    except Exception:
+    except Exception as exc:
+        _raise_if_cad_disconnected(exc)
         return False
 
 
@@ -1239,18 +1289,26 @@ def _iter_modelstudio_parameters(entity) -> dict[str, str]:
     try:
         element = getattr(entity, 'Element')
         params = getattr(element, 'Parameters')
-    except Exception:
+    except Exception as exc:
+        _raise_if_cad_disconnected(exc)
         return result
 
     # Model Studio COM collections are not always iterable, so support both styles.
     try:
         count = int(getattr(params, 'Count'))
-        for index in range(count):
-            for key in (index, index + 1):
+        try:
+            params.Item(0)
+            first_index = 0
+        except Exception as exc:
+            _raise_if_cad_disconnected(exc)
+            first_index = 1
+        for index in range(first_index, first_index + count):
+            for key in (index,):
                 try:
                     param = params.Item(key)
                     break
-                except Exception:
+                except Exception as exc:
+                    _raise_if_cad_disconnected(exc)
                     param = None
             if param is None:
                 continue
@@ -1259,11 +1317,13 @@ def _iter_modelstudio_parameters(entity) -> dict[str, str]:
                 continue
             try:
                 value = getattr(param, 'Value')
-            except Exception:
+            except Exception as exc:
+                _raise_if_cad_disconnected(exc)
                 value = ''
             result[name] = str(value if value is not None else '')
         return result
-    except Exception:
+    except Exception as exc:
+        _raise_if_cad_disconnected(exc)
         pass
 
     try:
@@ -1273,10 +1333,12 @@ def _iter_modelstudio_parameters(entity) -> dict[str, str]:
                 continue
             try:
                 value = getattr(param, 'Value')
-            except Exception:
+            except Exception as exc:
+                _raise_if_cad_disconnected(exc)
                 value = ''
             result[name] = str(value if value is not None else '')
-    except Exception:
+    except Exception as exc:
+        _raise_if_cad_disconnected(exc)
         pass
     return result
 
@@ -1297,7 +1359,8 @@ def _set_modelstudio_parameter(entity, parameter_name: str, value: str) -> bool:
     try:
         element = getattr(entity, 'Element')
         params = getattr(element, 'Parameters')
-    except Exception:
+    except Exception as exc:
+        _raise_if_cad_disconnected(exc)
         return False
 
     def existing_parameter():
@@ -1307,17 +1370,25 @@ def _set_modelstudio_parameter(entity, parameter_name: str, value: str) -> bool:
         for key in (clean_name, clean_name.upper(), clean_name.lower()):
             try:
                 return params.Item(key)
-            except Exception:
+            except Exception as exc:
+                _raise_if_cad_disconnected(exc)
                 pass
         try:
             count = int(getattr(params, 'Count'))
-            for index in range(count):
+            try:
+                params.Item(0)
+                first_index = 0
+            except Exception as exc:
+                _raise_if_cad_disconnected(exc)
+                first_index = 1
+            for index in range(first_index, first_index + count):
                 param = None
-                for key in (index, index + 1):
+                for key in (index,):
                     try:
                         param = params.Item(key)
                         break
-                    except Exception:
+                    except Exception as exc:
+                        _raise_if_cad_disconnected(exc)
                         pass
                 if param is None:
                     continue
@@ -1326,9 +1397,11 @@ def _set_modelstudio_parameter(entity, parameter_name: str, value: str) -> bool:
                         name = str(getattr(param, attr, '') or '').strip()
                         if name.upper() == clean_name.upper():
                             return param
-                    except Exception:
+                    except Exception as exc:
+                        _raise_if_cad_disconnected(exc)
                         pass
-        except Exception:
+        except Exception as exc:
+            _raise_if_cad_disconnected(exc)
             pass
         try:
             for param in params:
@@ -1337,9 +1410,11 @@ def _set_modelstudio_parameter(entity, parameter_name: str, value: str) -> bool:
                         name = str(getattr(param, attr, '') or '').strip()
                         if name.upper() == clean_name.upper():
                             return param
-                    except Exception:
+                    except Exception as exc:
+                        _raise_if_cad_disconnected(exc)
                         pass
-        except Exception:
+        except Exception as exc:
+            _raise_if_cad_disconnected(exc)
             pass
         return None
 
@@ -1356,33 +1431,20 @@ def _set_modelstudio_parameter(entity, parameter_name: str, value: str) -> bool:
                         except TypeError:
                             # A few wrappers require a regeneration mode.
                             func(1)
-                except Exception:
+                except Exception as exc:
+                    _raise_if_cad_disconnected(exc)
                     pass
-        try:
-            doc = getattr(entity, 'Document', None) or getattr(entity, 'OwnerDocument', None)
-            if doc is not None:
-                for method in ('Regen', 'Update'):
-                    try:
-                        func = getattr(doc, method, None)
-                        if callable(func):
-                            try:
-                                func(1)
-                            except TypeError:
-                                func()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
 
     def read_back_ok() -> bool:
         try:
             param = params.Item(clean_name)
             current = getattr(param, 'Value', '')
             return str(current if current is not None else '') == clean_value
-        except Exception:
-            # Do not fail a successful SetParameter only because readback is not
-            # exposed in this COM wrapper.
-            return True
+        except Exception as exc:
+            _raise_if_cad_disconnected(exc)
+            current = next((v for k, v in _iter_modelstudio_parameters(entity).items()
+                            if k.casefold() == clean_name.casefold()), None)
+            return current is not None and str(current) == clean_value
 
     existing = existing_parameter()
     caption = ''
@@ -1390,11 +1452,13 @@ def _set_modelstudio_parameter(entity, parameter_name: str, value: str) -> bool:
     if existing is not None:
         try:
             caption = str(getattr(existing, 'Comment', '') or '')
-        except Exception:
+        except Exception as exc:
+            _raise_if_cad_disconnected(exc)
             caption = ''
         try:
             comment = str(getattr(existing, 'ValueComment', '') or '')
-        except Exception:
+        except Exception as exc:
+            _raise_if_cad_disconnected(exc)
             comment = ''
 
     # Correct documented writer: Element.Parameters.SetParameter(...).
@@ -1410,7 +1474,10 @@ def _set_modelstudio_parameter(entity, parameter_name: str, value: str) -> bool:
                 refresh_modelstudio()
                 if read_back_ok():
                     return True
-            except Exception:
+                cad.emit('modelstudio_write_readback_mismatch', parameter=clean_name, expected=clean_value)
+            except Exception as exc:
+                _raise_if_cad_disconnected(exc)
+                _log_backend_error('modelstudio_write_attempt_failed', exc, {'parameter': clean_name, 'argumentCount': len(args)}, level=logging.WARNING)
                 continue
 
     # Last fallback only: direct Parameter.Value assignment. This is kept for old
@@ -1419,15 +1486,16 @@ def _set_modelstudio_parameter(entity, parameter_name: str, value: str) -> bool:
         try:
             setattr(existing, 'Value', clean_value)
             refresh_modelstudio()
-            return True
-        except Exception:
-            pass
+            return read_back_ok()
+        except Exception as exc:
+            _raise_if_cad_disconnected(exc)
+            _log_backend_error('modelstudio_write_fallback_failed', exc, {'parameter': clean_name}, level=logging.WARNING)
 
     return False
 
 def _summarize_blocks(ms) -> list[dict]:
     summaries: dict[str, dict] = {}
-    for entity in ms:
+    for entity in cad.entities(ms):
         if not _is_block_reference(entity):
             continue
         name = _block_name(entity)
@@ -1467,20 +1535,24 @@ def _summarize_blocks(ms) -> list[dict]:
 
 
 @app.get('/api/nanocad/blocks/scan')
-def scan_nanocad_blocks() -> dict:
+@cad.serialized
+def scan_nanocad_blocks(scope: str = 'auto') -> dict:
     _app, doc, ms = _connect_nanocad()
+    ms, resolved_scope = _cad_scope(doc, ms, scope)
     try:
         name = str(getattr(doc, 'Name', '') or '')
     except Exception:
         name = None
     return {
         'connected': True,
+        'scope': resolved_scope,
         'documentName': name,
         'blocks': _summarize_blocks(ms),
     }
 
 
 @app.post('/api/nanocad/blocks/pick')
+@cad.serialized
 def pick_nanocad_block() -> dict:
     _app, doc, _ms = _connect_nanocad()
     try:
@@ -1506,13 +1578,15 @@ def pick_nanocad_block() -> dict:
 
 
 @app.post('/api/nanocad/blocks/import')
+@cad.serialized
 def import_nanocad_blocks(request: NanoCadBlockImportRequest) -> dict:
     _app, _doc, ms = _connect_nanocad()
+    ms, resolved_scope = _cad_scope(_doc, ms, request.scope)
     block_name = request.blockName.strip()
     if not block_name:
         raise HTTPException(status_code=400, detail='Не задано имя блока')
     points: list[PilePoint] = []
-    for entity in ms:
+    for entity in cad.entities(ms):
         if not _is_block_reference(entity):
             continue
         if _block_name(entity) != block_name:
@@ -1552,8 +1626,10 @@ def import_nanocad_blocks(request: NanoCadBlockImportRequest) -> dict:
 
 
 @app.post('/api/nanocad/blocks/export')
+@cad.serialized
 def export_nanocad_blocks(request: NanoCadBlockExportRequest) -> dict:
     _app, _doc, ms = _connect_nanocad()
+    ms, resolved_scope = _cad_scope(_doc, ms, request.scope)
     block_name = request.blockName.strip()
     attr_name = request.numberAttribute.strip()
     if not block_name:
@@ -1569,7 +1645,7 @@ def export_nanocad_blocks(request: NanoCadBlockExportRequest) -> dict:
     scanned = 0
     unmatched_blocks: list[dict] = []
 
-    for entity in ms:
+    for entity in cad.entities(ms):
         if not _is_block_reference(entity):
             continue
         if _block_name(entity) != block_name:
@@ -1608,12 +1684,14 @@ def export_nanocad_blocks(request: NanoCadBlockExportRequest) -> dict:
 
 
 @app.get('/api/nanocad/modelstudio/scan')
-def scan_modelstudio_objects() -> dict:
+@cad.serialized
+def scan_modelstudio_objects(scope: str = 'auto') -> dict:
     _app, doc, ms = _connect_nanocad()
+    ms, resolved_scope = _cad_scope(doc, ms, scope)
     summaries: dict[str, dict] = {}
     skipped_errors = 0
     first_error: str | None = None
-    for entity_index, entity in enumerate(ms):
+    for entity_index, entity in enumerate(cad.entities(ms)):
         try:
             if not _has_modelstudio_element(entity):
                 continue
@@ -1645,6 +1723,7 @@ def scan_modelstudio_objects() -> dict:
                 if value not in stat['sampleValues'] and len(stat['sampleValues']) < 6:
                     stat['sampleValues'].append(value)
         except Exception as exc:
+            _raise_if_cad_disconnected(exc)
             skipped_errors += 1
             if first_error is None:
                 first_error = f'{type(exc).__name__}: {exc}'
@@ -1670,14 +1749,20 @@ def scan_modelstudio_objects() -> dict:
             'numberParameterCandidates': candidates,
         })
     result.sort(key=lambda item: (str(item.get('displayName') or item['name']), str(item.get('technicalName') or '')))
-    response = {'connected': True, 'documentName': str(getattr(doc, 'Name', '') or ''), 'objects': result}
+    cad.emit('modelstudio_scan_summary', types=len(result), objects=sum(item['count'] for item in result),
+             skippedErrors=skipped_errors, scope=resolved_scope)
+    response = {'connected': True, 'scope': resolved_scope, 'documentName': str(getattr(doc, 'Name', '') or ''), 'objects': result}
     if skipped_errors:
-        response['diagnostics'] = {'skippedErrors': skipped_errors, 'firstError': first_error, 'logFile': str(_backend_log_file())}
+        response['diagnostics'] = {'skippedErrors': skipped_errors, 'firstError': first_error, 'logFile': str(_backend_log_file()), 'scope': resolved_scope}
     return response
 
 @app.post('/api/nanocad/modelstudio/import')
+@cad.serialized
 def import_modelstudio_objects(request: NanoCadModelStudioImportRequest) -> dict:
     _app, _doc, ms = _connect_nanocad()
+    ms, resolved_scope = _cad_scope(_doc, ms, request.scope)
+    document_path = str(getattr(_doc, 'FullName', '') or '')
+    cad.emit('modelstudio_import_document', document=document_path, preserveHandles=request.preserveHandles)
     points: list[PilePoint] = []
     allowed_names = _modelstudio_allowed_names(request.objectName, request.selectedObjectNames)
     per_object_params = request.selectedObjectParameters or {}
@@ -1689,7 +1774,7 @@ def import_modelstudio_objects(request: NanoCadModelStudioImportRequest) -> dict
     first_coordinate_debug: dict | None = None
     first_error: str | None = None
 
-    for entity_index, entity in enumerate(ms):
+    for entity_index, entity in enumerate(cad.entities(ms)):
         try:
             if not _has_modelstudio_element(entity):
                 continue
@@ -1708,7 +1793,7 @@ def import_modelstudio_objects(request: NanoCadModelStudioImportRequest) -> dict
             params = _iter_modelstudio_parameters(entity)
             if not params:
                 skipped_empty_parameters += 1
-            number_parameter = str(per_object_params.get(name) or request.numberParameter or '').strip()
+            number_parameter = str(per_object_params.get(name, request.numberParameter) or '').strip()
             source_number = None
             if number_parameter:
                 for param_name, value in params.items():
@@ -1729,6 +1814,7 @@ def import_modelstudio_objects(request: NanoCadModelStudioImportRequest) -> dict
                 syncState=SyncState.added,
                 meta={
                     'source': 'nanocad_modelstudio',
+                    **({'cadHandle': str(getattr(entity, 'Handle', '') or ''), 'cadDocument': document_path} if request.preserveHandles else {}),
                     'objectName': name,
                     'apiType': api_type,
                     'numberParameter': number_parameter or None,
@@ -1738,6 +1824,7 @@ def import_modelstudio_objects(request: NanoCadModelStudioImportRequest) -> dict
                 },
             ))
         except Exception as exc:
+            _raise_if_cad_disconnected(exc)
             skipped_errors += 1
             if first_error is None:
                 first_error = f'{type(exc).__name__}: {exc}'
@@ -1807,54 +1894,190 @@ def import_modelstudio_objects(request: NanoCadModelStudioImportRequest) -> dict
     }
 
 @app.post('/api/nanocad/modelstudio/export')
+@cad.serialized
 def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict:
-    _app, _doc, ms = _connect_nanocad()
+    if not request.numberParameter.strip():
+        raise HTTPException(422, 'Укажите параметр для записи номера.')
+    if request.tolerance <= 0:
+        raise HTTPException(422, 'Допуск должен быть положительным.')
+    _app, doc, ms = _connect_nanocad()
+    ms, resolved_scope = _cad_scope(doc, ms, request.scope)
     source_points = _filter_export_points(request.points, request.selectedGroupIds)
     allowed_names = _modelstudio_allowed_names(request.objectName, request.selectedObjectNames)
+    document_path = str(getattr(doc, 'FullName', '') or '')
+    cad.emit('modelstudio_export_document', document=document_path, mode=request.matchMode,
+             parameter=request.numberParameter, points=len(source_points), allowedNames=sorted(allowed_names))
     used: set[int] = set()
-    scanned = 0
-    matched = 0
-    updated = 0
-    missing_parameter = 0
-    unmatched_objects: list[dict] = []
-    skipped_no_coordinates = 0
+    updated = matched = scanned = failed = skipped_no_coordinates = unresolved = 0
+    failures = []
+    unmatched_objects = []
 
-    for entity in ms:
+    if request.matchMode == 'auto':
+        keys = [str(p.meta.get('cadDocument', '')).casefold() + ':' + str(p.meta['cadHandle']).upper()
+                for p in source_points if p.meta.get('cadHandle') and p.meta.get('cadDocument')]
+        if len(keys) != len(set(keys)):
+            raise HTTPException(409, 'Несколько точек связаны с одним handle. Проверьте копии перед экспортом.')
+
+    if request.matchMode == 'handles':
+        # A handle only identifies an entity inside its original drawing.
+        # Validate the entire input before the first write, never silently fall back.
+        identities = set()
+        for point in source_points:
+            handle = str(point.meta.get('cadHandle') or '').strip().upper()
+            source_doc = str(point.meta.get('cadDocument') or '')
+            if not handle or not source_doc or not document_path or Path(source_doc).as_posix().casefold() != Path(document_path).as_posix().casefold():
+                raise HTTPException(409, 'Экспорт по handle требует исходный сохранённый чертёж и связь каждой точки. Откройте исходный DWG или выберите поиск по координатам.')
+            if handle in identities:
+                raise HTTPException(409, f'Повторяющийся handle {handle}. Проверьте копии точек перед экспортом.')
+            identities.add(handle)
+
+    selected_handles = None
+    if resolved_scope == 'selection':
+        selected_handles = {str(entity.Handle).upper() for entity in cad.entities(ms)}
+    direct_handles = set()
+
+    def targets():
+        nonlocal unresolved
+        if request.matchMode in ('auto', 'handles'):
+            cad.emit('modelstudio_handle_scan_started', points=len(source_points))
+            for index, point in enumerate(source_points):
+                cad.progress('Проверка сохранённых handle и запись номеров', index, len(source_points), updated=updated, failed=failed)
+                handle = str(point.meta.get('cadHandle') or '').upper()
+                source_doc = str(point.meta.get('cadDocument') or '')
+                if not handle or not source_doc or not document_path or Path(source_doc).as_posix().casefold() != Path(document_path).as_posix().casefold():
+                    continue
+                if handle in direct_handles:
+                    raise HTTPException(409, f'Повторяющийся handle {handle}. Проверьте копии точек.')
+                if selected_handles is not None and handle not in selected_handles:
+                    continue
+                try:
+                    entity = doc.HandleToObject(handle)
+                    if not _has_modelstudio_element(entity):
+                        unresolved += 1
+                        continue
+                    expected_name = str(point.meta.get('objectName') or '')
+                    if expected_name and _modelstudio_name(entity) != expected_name:
+                        unresolved += 1
+                        continue
+                except Exception as exc:
+                    _raise_if_cad_disconnected(exc)
+                    unresolved += 1
+                    cad.emit('modelstudio_handle_not_found', pointId=point.id, handle=handle, error=str(exc))
+                    continue
+                direct_handles.add(handle)
+                yield entity, (index, point, 0)
+            cad.progress('Проверка сохранённых handle и запись номеров', len(source_points), len(source_points), updated=updated, failed=failed)
+        if request.matchMode == 'coordinates' or (request.matchMode == 'auto' and len(used) < len(source_points)):
+            cad.emit('modelstudio_coordinate_scan_started', remainingPoints=len(source_points) - len(used))
+            for entity in cad.entities(ms):
+                if str(getattr(entity, 'Handle', '') or '').upper() in direct_handles:
+                    continue
+                yield entity, None
+
+    for entity, direct in targets():
         if not _has_modelstudio_element(entity):
             continue
         name = _modelstudio_name(entity)
         if allowed_names and name not in allowed_names:
             continue
-        insertion = _entity_insertion_point(entity)
-        if insertion is None:
-            skipped_no_coordinates += 1
-            continue
         scanned += 1
-        x, y, _z = insertion
-        found = _find_nearest_export_point(x, y, source_points, used, request.baseX, request.baseY, request.tolerance)
-        if found is None:
-            if len(unmatched_objects) < 20:
-                unmatched_objects.append({'objectName': name, 'x': x, 'y': y})
-            continue
+        if direct is not None:
+            found = direct
+            expected_name = str(direct[1].meta.get('objectName') or '')
+            if expected_name and expected_name != name:
+                unresolved += 1
+                continue
+        else:
+            insertion = _entity_insertion_point(entity)
+            if insertion is None:
+                skipped_no_coordinates += 1
+                continue
+            x, y, _z = insertion
+            # A coordinate coincidence must not bind a pile to a different MS type.
+            excluded = used | {i for i, p in enumerate(source_points)
+                               if p.meta.get('objectName') and str(p.meta['objectName']) != name}
+            found = _find_nearest_export_point(x, y, source_points, excluded, request.baseX, request.baseY, request.tolerance)
+            if found is None:
+                if len(unmatched_objects) < 20:
+                    unmatched_objects.append({'objectName': name, 'x': x, 'y': y})
+                continue
         index, point, _dist = found
         used.add(index)
         matched += 1
         value = _export_number_text(point)
         if value is None:
             continue
-        if _set_modelstudio_parameter(entity, request.numberParameter, value):
+        handle = str(getattr(entity, 'Handle', '') or '')
+        try:
+            success = _set_modelstudio_parameter(entity, request.numberParameter, value)
+        except Exception as exc:
+            _raise_if_cad_disconnected(exc)
+            success = False
+            _log_backend_error('modelstudio_export_entity_error', exc, {'pointId': point.id, 'handle': handle})
+        if success:
             updated += 1
         else:
-            missing_parameter += 1
-    return {
-        'updated': updated,
-        'matched': matched,
-        'scanned': scanned,
-        'points': len(source_points),
-        'unusedPoints': max(0, len(source_points) - len(used)),
-        'missingParameter': missing_parameter,
-        'tolerance': request.tolerance,
-        'selectedObjectNames': sorted(allowed_names),
-        'skippedNoCoordinates': skipped_no_coordinates,
-        'unmatchedObjects': unmatched_objects,
+            failed += 1
+            if len(failures) < 20:
+                failures.append({'pointId': point.id, 'handle': handle, 'parameter': request.numberParameter})
+        cad.emit('modelstudio_write_result', pointId=point.id, handle=handle, parameter=request.numberParameter, value=value, verified=success)
+    saved = False
+    save_error = None
+    if updated:
+        try:
+            doc.Regen(1)
+        except Exception as exc:
+            _log_backend_error('modelstudio_regen_failed', exc, level=logging.WARNING)
+        if request.saveDrawing and not failed:
+            try:
+                if not document_path or not Path(document_path).is_absolute():
+                    raise ValueError('Сначала сохраните исходный чертёж в nanoCAD.')
+                cad.progress('Сохранение DWG')
+                doc.Save()
+                saved = True
+                cad.emit('modelstudio_drawing_saved', document=document_path)
+            except Exception as exc:
+                save_error = str(exc)
+                _log_backend_error('modelstudio_drawing_save_failed', exc, {'document': document_path, 'updated': updated})
+    return {'updated': updated, 'matched': matched, 'scanned': scanned, 'points': len(source_points),
+            'unusedPoints': len(source_points) - len(used), 'missingParameter': failed, 'failedWrites': failed,
+            'unresolvedHandles': unresolved, 'failures': failures, 'tolerance': request.tolerance,
+            'selectedObjectNames': sorted(allowed_names), 'skippedNoCoordinates': skipped_no_coordinates,
+            'unmatchedObjects': unmatched_objects, 'documentName': document_path, 'saved': saved, 'saveError': save_error,
+            'logFile': str(_backend_log_file()), 'scope': resolved_scope}
+
+
+class CadJobRequest(BaseModel):
+    kind: str
+    payload: dict = Field(default_factory=dict)
+
+
+@app.post('/api/nanocad/operations')
+def start_cad_operation(request: CadJobRequest):
+    routes = {
+        'blocks/scan': (scan_nanocad_blocks, None),
+        'blocks/pick': (pick_nanocad_block, None),
+        'blocks/import': (import_nanocad_blocks, NanoCadBlockImportRequest),
+        'blocks/export': (export_nanocad_blocks, NanoCadBlockExportRequest),
+        'modelstudio/scan': (scan_modelstudio_objects, None),
+        'modelstudio/import': (import_modelstudio_objects, NanoCadModelStudioImportRequest),
+        'modelstudio/export': (export_modelstudio_objects, NanoCadModelStudioExportRequest),
     }
+    if request.kind not in routes:
+        raise HTTPException(422, 'Неизвестная операция nanoCAD.')
+    func, schema = routes[request.kind]
+    try:
+        args = (schema.model_validate(request.payload),) if schema else ((str(request.payload.get('scope', 'auto')), ) if request.kind.endswith('/scan') else ())
+    except ValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return cad.start(request.kind, func, *args)
+
+
+@app.get('/api/nanocad/operations/{operation_id}')
+def get_cad_operation(operation_id: str):
+    return cad.status(operation_id)
+
+
+@app.get('/api/nanocad/operations/{operation_id}/logs')
+def get_cad_operation_logs(operation_id: str):
+    return cad.logs(operation_id)

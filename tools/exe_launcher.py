@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import traceback
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -264,6 +265,45 @@ def _wait_for_backend(url: str, thread: BackendThread, timeout_seconds: float = 
 
 
 class DesktopApi:
+    def __init__(self) -> None:
+        self._window = None
+        self._ready = False
+        self._shown = False
+        self._allow_close = False
+
+    def frontendReady(self) -> None:  # noqa: N802
+        self._ready = True
+        logging.info("Frontend ready: first paint completed, desktop bridge connected")
+        self._finish_startup()
+
+    def _on_shown(self) -> None:
+        self._shown = True
+        logging.info("Desktop window shown")
+        self._finish_startup()
+
+    def _finish_startup(self) -> None:
+        if self._ready and self._shown:
+            logging.info("Desktop workspace ready, closing splash")
+            _splash_close()
+
+    def closeConfirmed(self) -> None:  # noqa: N802
+        if self._window is not None:
+            self._allow_close = True
+            self._window.destroy()
+
+    def _on_closing(self) -> bool:
+        if self._allow_close or not self._ready:
+            _splash_close()
+            return True
+        # FormClosing runs on the GUI thread: never wait for evaluate_js here.
+        def notify() -> None:
+            try:
+                self._window.evaluate_js("window.dispatchEvent(new Event('pile-numbering:close-requested'))")
+            except Exception:
+                logging.exception("Could not show unsaved project dialog; keeping window open")
+        threading.Thread(target=notify, daemon=True).start()
+        return False
+
     def saveProjectJson(self, file_name: str, content: str) -> dict[str, Any]:  # noqa: N802 - pywebview JS API name
         try:
             import webview
@@ -275,7 +315,7 @@ class DesktopApi:
             window = webview.windows[0] if webview.windows else None
             if window is None:
                 fallback = APP_DIR / safe_name
-                fallback.write_text(str(content), encoding="utf-8")
+                _atomic_write_project(fallback, str(content))
                 return {"saved": True, "path": str(fallback)}
 
             result = window.create_file_dialog(
@@ -291,7 +331,7 @@ class DesktopApi:
             if not path.suffix:
                 path = path.with_suffix(".pilenum.json")
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(str(content), encoding="utf-8")
+            _atomic_write_project(path, str(content))
             logging.info("JSON project exported through desktop dialog: %s", path)
             return {"saved": True, "path": str(path)}
         except Exception as exc:  # noqa: BLE001 - diagnostics returned to frontend
@@ -299,36 +339,80 @@ class DesktopApi:
             return {"saved": False, "error": str(exc)}
 
 
+def _atomic_write_project(path: Path, content: str) -> None:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _splash_message(message: str) -> None:
+    try:
+        import pyi_splash
+        if pyi_splash.is_alive():
+            pyi_splash.update_text(message)
+    except ImportError:
+        pass  # Development mode has no bootloader splash.
+    except Exception:
+        logging.debug("Splash update unavailable", exc_info=True)
+
+
+def _splash_close() -> None:
+    try:
+        import pyi_splash
+        pyi_splash.close()
+    except ImportError:
+        pass
+    except Exception:
+        logging.debug("Splash already closed", exc_info=True)
+
+
 def main() -> int:
     try:
+        _splash_message("Загрузка модулей программы…")
         os.chdir(APP_DIR)
         _configure_local_proxy_bypass()
         app = _prepare_app()
+        _splash_message("Запуск локального сервера…")
         port = _find_free_port()
         host = "127.0.0.1"
         base_url = f"http://{host}:{port}"
         backend_thread = _start_backend(app, host, port)
         _wait_for_backend(f"{base_url}/health", backend_thread)
         logging.info("Backend started: %s", base_url)
+        _splash_message("Подготовка рабочего пространства…")
 
         import webview
 
+        desktop_api = DesktopApi()
         window = webview.create_window(
             "Нумератор свайного поля",
             base_url,
             width=1500,
             height=950,
             min_size=(1100, 700),
-            js_api=DesktopApi(),
+            js_api=desktop_api,
+            maximized=True,
+            background_color="#111827",
         )
-        try:
-            window.maximize()
-        except Exception:
-            pass
+        desktop_api._window = window
+        window.events.shown += desktop_api._on_shown
+        window.events.closing += desktop_api._on_closing
+        window.events.closed += _splash_close
+        # maximize() waits for 'shown' and blocks for 20 s before start().
+        # Use the initial maximized flag instead of calling a window API here.
         webview.start(debug=False)
         logging.info("Application closed")
         return 0
     except Exception as exc:  # noqa: BLE001 - top-level launcher guard
+        _splash_close()
         logging.exception("Fatal launcher error")
         _message_box(
             "Pile Numbering App — ошибка запуска",
