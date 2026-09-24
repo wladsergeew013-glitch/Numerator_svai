@@ -114,6 +114,7 @@ function ColorSelector({ group }: { group: PileGroup }) {
     <div className="color-selector" onClick={stop} onMouseDown={stop}>
       <button
         className="color-swatch-button tooltip"
+        disabled={group.locked}
         data-tooltip={'Цвет группы\nБыстрый выбор базового CAD-цвета. Если нужного цвета нет — откройте Другой цвет.'}
         style={{ backgroundColor: group.color }}
         onClick={() => setOpen((value) => !value)}
@@ -127,6 +128,7 @@ function ColorSelector({ group }: { group: PileGroup }) {
               <button
                 key={color.value}
                 className={`cad-color-cell ${group.color.toLowerCase() === color.value.toLowerCase() ? 'selected' : ''}`}
+                disabled={group.locked}
                 style={{ backgroundColor: color.value }}
                 title={color.name}
                 onClick={() => {
@@ -138,7 +140,7 @@ function ColorSelector({ group }: { group: PileGroup }) {
           </div>
           <label className="custom-color-row">
             Другой цвет...
-            <input type="color" value={group.color} onChange={(e) => updateGroupColor(group.id, e.target.value)} />
+            <input type="color" value={group.color} disabled={group.locked} onChange={(e) => updateGroupColor(group.id, e.target.value)} />
           </label>
         </div>
       )}
@@ -263,6 +265,10 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
     const method = normalizeMethod(g.numbering.method);
     const clusterNumbering = metaBoolean(g.meta?.clusterNumbering);
     const clusterPrefix = metaPositiveNumber(g.meta?.clusterPrefix, index + 1);
+    const groupNumberLabelOffset = g.meta?.groupNumberLabelOffset as { x?: unknown; y?: unknown } | undefined;
+    const labelMoved = Boolean(groupNumberLabelOffset &&
+      ((typeof groupNumberLabelOffset.x === 'number' && Math.abs(groupNumberLabelOffset.x) > 0.001) ||
+       (typeof groupNumberLabelOffset.y === 'number' && Math.abs(groupNumberLabelOffset.y) > 0.001)));
     const coordinates = groupPoints.map((p) => method === 'rows' ? p.y : p.x);
     const span = count ? Math.max(...coordinates) - Math.min(...coordinates) : 0;
     const toleranceTooLarge = span > 0 && (method === 'rows' ? g.numbering.rowTolerance : g.numbering.columnTolerance) >= span;
@@ -272,6 +278,14 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
                           <label>Название группы</label>
                           <input aria-label="Название группы" value={g.name} disabled={g.locked} onChange={(e) => updateGroupName(g.id, e.target.value)} />
                         </div>
+                        <div className="field-row group-settings-color-row">
+                          <label>Цвет группы</label>
+                          <div className="group-settings-color-control"><ColorSelector group={g} /><span>{g.color.toUpperCase()}</span><small>Нажмите на цвет для выбора палитры</small></div>
+                        </div>
+                        {labelMoved && <div className="field-row">
+                          <label>Подпись группы</label>
+                          <button className="btn small" disabled={g.locked} onClick={() => { useProjectStore.getState().pushHistory(); updateGroupMeta(g.id, { groupNumberLabelOffset: null }); }}>Вернуть к центру группы</button>
+                        </div>}
                         <div className="field-row">
                           <label>Порядок нумерации</label>
                           <input key={`${g.id}:${g.order}`} aria-label="Порядок нумерации группы" type="number" min={1} max={visibleGroups.length} defaultValue={g.order} disabled={g.locked}
@@ -702,7 +716,7 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
       </div>
 
     </DraggablePanel>)}
-    {detailsGroup && <DraggablePanel id="group-details" title={`О группе · ${detailsGroup.name}`} initialX={Math.max(24, window.innerWidth - 610)} initialY={offsetTop + 20} width={560} height={Math.max(320, Math.min(620, window.innerHeight - offsetTop - offsetBottom - 30))} minWidth={400} minHeight={320} dockable dockOffsetTop={offsetTop} dockOffsetBottom={offsetBottom} className="group-details-panel" onClose={closeGroupDetails}>
+    {detailsGroup && <DraggablePanel id="group-details" title={`О группе · ${detailsGroup.name}`} initialX={Math.max(24, window.innerWidth - 482)} initialY={offsetTop + 20} width={470} height={Math.max(320, Math.min(620, window.innerHeight - offsetTop - offsetBottom - 30))} minWidth={400} minHeight={320} dockable dockOffsetTop={offsetTop} dockOffsetBottom={offsetBottom} className="group-details-panel" onClose={closeGroupDetails}>
       <div className="group-details-summary"><span>Позиция: {detailsGroup.order}</span><span>Точек: {pointCounts.get(detailsGroup.id) ?? 0}</span><span>С номером: {numberedCounts.get(detailsGroup.id) ?? 0}</span></div>
       <button className="btn primary" disabled={detailsGroup.locked || !pointCounts.get(detailsGroup.id)} onClick={() => void numberGroup(detailsGroup.id)}>Пронумеровать группу</button>
       {numberingError && <div role="alert">{numberingError}</div>}

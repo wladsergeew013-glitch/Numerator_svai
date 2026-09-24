@@ -46,7 +46,7 @@ def check_toolbar() -> None:
     fixed_labels = [
         "Создать", "Открыть", "Проекты", "Импорт", "Сохранить", "Имя проекта", "Экспорт",
         "Новая точка", "Удалить", "Переместить", "Копировать", "Копия группы", "О точке",
-        "Группы", "В группу", "Порядок", "Убрать связи", "№ группы", "№ всех",
+        "Группы", "В группу", "Весь путь", "Убрать связи", "Нумеровать группу", "Нумеровать все",
         "Всё поле", "Сетка", "Номера", "Без номера", "Проверка", "Настройки", "Отмена", "Повтор", "Журнал",
     ]
     for label in fixed_labels:
@@ -57,8 +57,10 @@ def check_toolbar() -> None:
     require(toolbar, "ghost-ribbon-group", "Toolbar.tsx")
     require(toolbar, "ribbonScrollLeftRef", "Toolbar.tsx")
     require(toolbar, "create-project-dialog", "Toolbar.tsx")
-    require(toolbar, "import-data-dialog", "Toolbar.tsx")
-    require(toolbar, "export-data-dialog", "Toolbar.tsx")
+    require(toolbar, "cad-transfer-dialog", "Toolbar.tsx")
+    require(toolbar, "transferTab === 'scan'", "Toolbar.tsx")
+    require(toolbar, "transferTab === 'import'", "Toolbar.tsx")
+    require(toolbar, "transferTab === 'export'", "Toolbar.tsx")
     require(toolbar, "buildCsvPreview", "Toolbar.tsx")
     require(toolbar, "buildExcelPreview", "Toolbar.tsx")
     require(toolbar, "buildImportPreview", "Toolbar.tsx")
@@ -78,9 +80,9 @@ def check_toolbar() -> None:
     require(toolbar, "exportNanoCadModelStudioObjects", "Toolbar.tsx")
     require(toolbar, "setNanoCadTransferStatus", "Toolbar.tsx")
     require(toolbar, "Способ поиска объектов", "Toolbar.tsx")
-    require(toolbar, "refreshNanoCadBlocks('export')", "Toolbar.tsx")
-    require(toolbar, "pickNanoCadSample('export')", "Toolbar.tsx")
-    require(toolbar, "refreshNanoCadModelStudioObjects('export')", "Toolbar.tsx")
+    require(toolbar, "refreshNanoCadBlocks()", "Toolbar.tsx")
+    require(toolbar, "pickNanoCadSample()", "Toolbar.tsx")
+    require(toolbar, "refreshNanoCadModelStudioObjects()", "Toolbar.tsx")
     require(toolbar, "wizard-step", "Toolbar.tsx")
     require(toolbar, "export-group-list", "Toolbar.tsx")
     require(toolbar, "base-point-card", "Toolbar.tsx")

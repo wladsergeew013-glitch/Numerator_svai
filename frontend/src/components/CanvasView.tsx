@@ -1605,6 +1605,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
       const c = centers.get(g.id)!;
       const pipeline = project.pipelines.find(p => p.id === g.pipelineId);
       return { id: g.id, x: c.x / c.count, y: c.y / c.count, color: g.color,
+        offset: readMetaOffset(g.meta, 'groupNumberLabelOffset'), locked: g.locked,
         text: `${project.pipelines.length > 1 ? `П.${pipeline?.order ?? 1} · ` : ''}Гр. ${g.order}` };
     });
   }, [project.points, project.groups, project.pipelines, project.viewSettings.showGroupNumbers]);
@@ -1613,10 +1614,11 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
   const numberingEndPointId = activeNumberingGroup?.numbering.endPointId ?? null;
   const allGroupRoutes = useMemo(() => {
     if (!allGroupsOrderVisible) return [];
-    return project.groups.filter(group => group.visible !== false).map(group => ({
+    const focusedGroupId = project.viewSettings.dimOtherGroups ? selectedGroupId : null;
+    return project.groups.filter(group => group.visible !== false && (!focusedGroupId || group.id === focusedGroupId)).map(group => ({
       id: group.id, color: group.color, points: buildPreviewOrderForGroup(project, group).route
     }));
-  }, [allGroupsOrderVisible, project.points, project.groups, project.pipelines, project.numberingMode]);
+  }, [allGroupsOrderVisible, project.points, project.groups, project.pipelines, project.numberingMode, project.viewSettings.dimOtherGroups, selectedGroupId]);
   const groupFlow = useMemo(() => project.viewSettings.showGroupFlow === true
     ? buildGroupFlow(project) : { endpoints: [], links: [] },
   [project.points, project.groups, project.pipelines, project.numberingMode, project.viewSettings.showGroupFlow]);
@@ -2324,6 +2326,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     : { stroke: '#22c55e', fill: 'rgba(34,197,94,0.13)', dash: [1, 0], label: selectionRect?.label ?? 'Добавить к выбору' };
 
   const displayedPreviewPoints = previewPoints.slice(0, Math.max(1, Math.min(previewStep, previewPoints.length)));
+  const showPreviewStepMarkers = numberingPreview.displayMode !== 'full' || !project.viewSettings.showPointNumbers || displayedPreviewPoints.some(point => point.number == null);
   const previewSegments = useMemo(() => {
     if (!numberingPreview.visible || project.viewSettings.showNumberingPreview === false || displayedPreviewPoints.length === 0) return [] as Array<{
       key: string;
@@ -2571,8 +2574,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
 
         </Layer>
 
-        <Layer>
-          {activeGroupOutline && activeGroupOutline.points.length >= 6 && (
+        {activeGroupOutline && activeGroupOutline.points.length >= 6 && <Layer>
             <Group>
               <Line
                 points={activeGroupOutline.points}
@@ -2650,11 +2652,9 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
                 />
               </Group>
             </Group>
-          )}
-        </Layer>
+        </Layer>}
 
-        <Layer>
-          {activeNumberingGroup && activeVectorPathScreenPoints.length >= 2 && (
+        {activeNumberingGroup && activeVectorPathScreenPoints.length >= 2 && <Layer>
             <Group
               name="active-vector-path-editable-handles"
               listening={vectorPathEditMode && !vectorExtendState && !activeNumberingGroup.locked && !vectorPathDrawMode && !groupOutlineDrawMode && !numberingPickMode && !editPointPickMode}
@@ -2823,11 +2823,9 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
                 />
               )}
             </Group>
-          )}
-        </Layer>
+        </Layer>}
 
-        <Layer>
-          {groupOutlineDrawMode && (
+        {groupOutlineDrawMode && <Layer>
             <Group>
               {groupOutlineDraft.length > 0 && (() => {
                 const points = groupOutlineDraft.map((point) => worldToScreen(point.x, point.y)).filter(isFinitePoint);
@@ -2931,11 +2929,9 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
                 listening={false}
               />
             </Group>
-          )}
-        </Layer>
+        </Layer>}
 
-        <Layer>
-          {vectorPathDrawMode && (
+        {vectorPathDrawMode && <Layer>
             <Group listening={false}>
               {vectorPathDraft.length > 0 && (() => {
                 const points = vectorPathDraft.map((point) => worldToScreen(point.x, point.y)).filter(isFinitePoint);
@@ -3026,11 +3022,9 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
                 fontStyle="bold"
               />
             </Group>
-          )}
-        </Layer>
+        </Layer>}
 
-        <Layer>
-          {numberingPreview.visible && project.viewSettings.showNumberingPreview !== false && previewPoints.length > 0 && (
+        {numberingPreview.visible && project.viewSettings.showNumberingPreview !== false && previewPoints.length > 0 && <Layer>
             <Group>
               {previewSegments.map((segment) => (
                 <Group
@@ -3108,7 +3102,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
                   </Group>
                 );
               })()}
-              {!focusedManualLink && displayedPreviewPoints.map((p, index) => {
+              {!focusedManualLink && showPreviewStepMarkers && displayedPreviewPoints.map((p, index) => {
                 const sp = worldToScreen(p.x, p.y);
                 if (!isFinitePoint(sp)) return null;
                 return (
@@ -3142,15 +3136,29 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
                 );
               })}
             </Group>
-          )}
-        </Layer>
+        </Layer>}
 
-        {project.viewSettings.showGroupNumbers && <Layer listening={false}>
+        {project.viewSettings.showGroupNumbers && <Layer>
           {groupLabels.map(label => {
             const sp = worldToScreen(label.x, label.y);
-            if (sp.x < -100 || sp.x > width + 100 || sp.y < -100 || sp.y > height + 100) return null;
             const w = textWidth(label.text, 13) + 14;
-            return <Group key={label.id} x={sp.x - w / 2} y={sp.y - 30}>
+            const baseX = sp.x - w / 2;
+            const baseY = sp.y - 30;
+            const labelX = baseX + label.offset.x * zoom;
+            const labelY = baseY - label.offset.y * zoom;
+            if (labelX < -w - 20 || labelX > width + 20 || labelY < -43 || labelY > height + 20) return null;
+            return <Group key={label.id} x={labelX} y={labelY} listening={!label.locked} draggable={!label.locked}
+              onMouseDown={(event) => { event.cancelBubble = true; }}
+              onTouchStart={(event) => { event.cancelBubble = true; }}
+              onClick={(event) => { event.cancelBubble = true; }}
+              onDragStart={(event) => { event.cancelBubble = true; pushHistory(); }}
+              onDragEnd={(event) => {
+                event.cancelBubble = true;
+                updateGroupMeta(label.id, { groupNumberLabelOffset: {
+                  x: Math.round(((event.target.x() - baseX) / Math.max(zoom, 1e-9)) * 100) / 100,
+                  y: Math.round((-(event.target.y() - baseY) / Math.max(zoom, 1e-9)) * 100) / 100
+                } });
+              }}>
               <Rect width={w} height={23} fill="#0f172a" stroke={label.color} cornerRadius={4} />
               <Text text={label.text} x={7} y={5} fontSize={13} fill="#f8fafc" />
             </Group>;
@@ -3190,14 +3198,25 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
             const selected = selectedIds.has(p.id);
             const focusedPoint = focusedPointIds.has(p.id);
             const unnumbered = p.number == null || p.number === undefined;
+            const dimmedByGroupFocus = Boolean(selectedGroupId && project.viewSettings.dimOtherGroups && p.groupId !== selectedGroupId);
+            // A dimmed point needs only a hit target and a faint dot. Building its
+            // number label, callouts and nested groups for every mouse pan makes
+            // large numbered fields noticeably slower in focus mode.
+            if (dimmedByGroupFocus) {
+              return <Circle key={p.id} x={sp.x} y={sp.y} radius={4} fill={fill} opacity={0.16}
+                perfectDrawEnabled={false} hitStrokeWidth={10}
+                onMouseDown={e => onPointMouseDown(e, p.id)} onClick={e => onPointClick(e, p.id)}
+                onDblClick={e => onPointDblClick(e, p.id)} onTap={e => onPointClick(e as any, p.id)} />;
+            }
             const vectorWorkMode = vectorPathDrawMode || vectorPathEditMode || Boolean(vectorExtendState);
-            const pointOpacity = manualLinkClearMode
+            const basePointOpacity = manualLinkClearMode
               ? (manualLinkClearPointIds.has(p.id) ? 1 : 0.18)
               : vectorWorkMode
                 ? (selected ? 0.78 : 0.34)
                 : project.viewSettings.highlightUnnumbered
                   ? (unnumbered || selected ? 1 : 0.12)
                   : focusedManualLink && !focusedPoint ? 0.22 : 1;
+            const pointOpacity = basePointOpacity;
             const propertySource = propertySourcePointId === p.id;
             const copyBase = copyBasePointId === p.id;
             const numberingStart = effectiveNumberingStartPointId === p.id;
@@ -3205,7 +3224,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
             const numberingStartAuto = !numberingStartPointId && numberingStart;
             const numberingEndAuto = !numberingEndPointId && numberingEnd;
             if (project.viewSettings.highlightUnnumbered && !unnumbered && !selected && !propertySource && !copyBase && !numberingStart && !numberingEnd) {
-              return <Circle key={p.id} x={sp.x} y={sp.y} radius={3} fill={fill} opacity={0.16}
+              return <Circle key={p.id} x={sp.x} y={sp.y} radius={3} fill={fill} opacity={pointOpacity * 0.16}
                 perfectDrawEnabled={false} hitStrokeWidth={10}
                 onMouseDown={e => onPointMouseDown(e, p.id)} onClick={e => onPointClick(e, p.id)}
                 onDblClick={e => onPointDblClick(e, p.id)} onTap={e => onPointClick(e as any, p.id)} />;
@@ -3383,8 +3402,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
           })}
         </Layer>
 
-        <Layer listening={false}>
-          {selectionRect && selectionRect.w > 2 && selectionRect.h > 2 && selectionStyle && (
+        {selectionRect && selectionRect.w > 2 && selectionRect.h > 2 && selectionStyle && <Layer listening={false}>
             <Group>
               <Rect
                 x={selectionRect.x}
@@ -3405,8 +3423,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
                 fontStyle="bold"
               />
             </Group>
-          )}
-        </Layer>
+        </Layer>}
         <Layer listening={false}>
           <Group name={cadAxes.atOrigin ? 'cad-axes-at-origin' : 'cad-axes-in-corner'} listening={false}>
             {!cadAxes.atOrigin && <Rect x={cadAxes.x - 14} y={cadAxes.y - 68} width={96} height={86} cornerRadius={8} fill="rgba(2,6,23,0.78)" stroke="rgba(148,163,184,0.3)" />}

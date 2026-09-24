@@ -138,6 +138,9 @@ if errorlevel 1 (
 )
 popd >nul
 
+node "%ROOT%\tools\checks\production_api_check.cjs" >> "%LOG_FILE%" 2>&1
+if errorlevel 1 goto fail_with_log
+
 if not exist "%ROOT%\frontend\dist\index.html" (
     echo [ERROR] frontend\dist\index.html not found after build.
     >> "%LOG_FILE%" echo [ERROR] frontend build output missing.

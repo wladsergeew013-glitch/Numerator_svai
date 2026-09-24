@@ -1,5 +1,5 @@
 import { projectSaveSignature } from '../utils/projectSaveState';
-import { newImportPoints } from '../utils/importPoints';
+import { newImportPoints, reconcileCadImport, type CadImportReconciliation } from '../utils/importPoints';
 import { DEFAULT_CLUSTER_OPTIONS, type ClusterApplication } from '../types/clustering';
 import { create } from 'zustand';
 import { getUserConfig, numberRows, saveUserConfig as saveUserConfigFile, type UserConfigPayload } from '../api/client';
@@ -1712,6 +1712,7 @@ interface ProjectState {
   startNewProjectFromImport: (fileName: string, points: PilePoint[]) => void;
   createNewProject: (name?: string) => void;
   appendImportedPoints: (fileName: string, points: PilePoint[]) => void;
+  syncCadImportedPoints: (fileName: string, points: PilePoint[], overwriteNumbers?: boolean) => CadImportReconciliation;
   setProjectLocalFileName: (fileName: string | null, name?: string) => void;
   setProjectName: (name: string) => void;
   setPoints: (points: PilePoint[]) => void;
@@ -1803,6 +1804,10 @@ interface ProjectState {
   updateGridSettings: (patch: Partial<GridSettings>) => void;
   updatePointNumberLabelOffset: (pointId: string, offset: Point2D | null) => void;
   setPointManualNumber: (pointId: string, number: number) => void;
+  syncPointFromModel: (pointId: string, action: 'read' | 'write' | 'position', result: {
+    x?: number; y?: number; rawPosition?: { x: number; y: number; z: number };
+    rawNumber?: string; number?: number | null; parameterName?: string; manualOverride?: boolean;
+  }) => void;
   clearPointManualNumber: (pointId: string) => void;
   clearManualNumbersForGroup: (groupId: string) => void;
   setSettingsHoverTarget: (target: string | null) => void;
@@ -1938,7 +1943,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       ...project,
       project: {
         ...project.project,
-        fileName: project.project.fileName ?? fileName,
+        fileName,
         sourceFileName: project.project.sourceFileName ?? fileName,
         name: project.project.name && project.project.name !== 'Untitled project' ? project.project.name : fileBaseName(fileName)
       }
@@ -2021,6 +2026,33 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     get().recordOperation('csv_appended', { points: points.length, sourceFileName: fileName });
   },
 
+  syncCadImportedPoints: (fileName, incoming, overwriteNumbers = false) => {
+    const state = get();
+    const lockedGroupIds = new Set(state.project.groups.filter(group => group.locked).map(group => group.id));
+    const result = reconcileCadImport(state.project.points, incoming, { overwriteNumbers, lockedGroupIds });
+    if (!result.added.length && !result.moved.length && !result.linked.length && !result.renumbered.length) return result;
+    get().pushHistory();
+    const changedById = new Map([...result.moved, ...result.linked, ...result.renumbered].map(point => [point.id, point]));
+    set((state) => ({
+      project: {
+        ...state.project,
+        points: [...state.project.points.map(point => changedById.get(point.id) ?? point), ...result.added],
+        project: {
+          ...state.project.project,
+          sourceFileName: state.project.project.sourceFileName ?? fileName,
+          updatedAt: new Date().toISOString()
+        }
+      },
+      selectedPointIds: [...new Set([...result.moved, ...result.linked, ...result.renumbered, ...result.added].map(point => point.id))]
+    }));
+    get().recordOperation('cad_import_synchronized', {
+      added: result.added.length, moved: result.moved.length, linked: result.linked.length,
+      renumbered: result.renumbered.length, unchanged: result.unchanged,
+      sourceFileName: fileName
+    });
+    return result;
+  },
+
   setProjectLocalFileName: (fileName, name) => {
     set((state) => ({
       project: withProjectFileMeta(state.project, {
@@ -2060,6 +2092,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const group = groupId ? get().project.groups.find((item) => item.id === groupId) : null;
     set({
       selectedGroupId: groupId,
+      groupDetailsId: groupId && get().groupDetailsId ? groupId : get().groupDetailsId,
       selectedPipelineId: group ? groupPipelineId(group, get().project) : get().selectedPipelineId,
       numberingPickMode: null,
       numberingLinkFromId: null,
@@ -3026,8 +3059,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   updateGroupColor: (groupId, color) => {
+    const group = get().project.groups.find(g => g.id === groupId);
+    if (!group || group.locked || group.color === color || !/^#[0-9a-fA-F]{6}$/.test(color)) return;
+    get().pushHistory();
     set((state) => ({
-      project: { ...state.project, groups: state.project.groups.map((g) => (g.id === groupId ? { ...g, color } : g)) }
+      project: { ...state.project, groups: state.project.groups.map((g) => (g.id === groupId ? { ...g, color } : g)),
+        project: { ...state.project.project, updatedAt: new Date().toISOString() } }
     }));
   },
 
@@ -3321,6 +3358,43 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (get().numberingPreview.visible && point.groupId === get().numberingPreview.groupId) get().buildNumberingPreview();
   },
 
+  syncPointFromModel: (pointId, action, result) => {
+    const point = get().project.points.find(p => p.id === pointId);
+    const group = point?.groupId ? get().project.groups.find(g => g.id === point.groupId) : null;
+    if (!point || point.locked || group?.locked) return;
+    if (action === 'position' && (!Number.isFinite(result.x) || !Number.isFinite(result.y))) return;
+    get().pushHistory();
+    set(state => ({
+      project: {
+        ...state.project,
+        points: state.project.points.map(current => {
+          if (current.id !== pointId) return current;
+          const meta = { ...current.meta };
+          if (action === 'position') {
+            meta.rawInsertionPoint = result.rawPosition ?? { x: result.x, y: result.y, z: 0 };
+            return { ...current, x: result.x!, y: result.y!,
+              syncState: current.x !== result.x || current.y !== result.y ? 'moved' as const : current.syncState,
+              meta };
+          }
+          if (result.parameterName) meta.numberParameter = result.parameterName;
+          if (result.rawNumber !== undefined) {
+            const parameters = typeof meta.parameters === 'object' && meta.parameters !== null
+              ? meta.parameters as Record<string, unknown> : {};
+            meta.parameters = { ...parameters, [result.parameterName || 'number']: result.rawNumber };
+          }
+          return {
+            ...current, meta,
+            sourceNumber: result.rawNumber ?? current.sourceNumber,
+            number: action === 'read' ? (result.number ?? null) : action === 'write' ? (result.number ?? current.number) : current.number,
+            manualNumber: action === 'read' ? false : result.manualOverride ? true : current.manualNumber
+          };
+        }),
+        project: { ...state.project.project, updatedAt: new Date().toISOString() }
+      }
+    }));
+    get().recordOperation('point_model_synchronized', { pointId, action, parameterName: result.parameterName });
+  },
+
   clearPointManualNumber: (pointId) => {
     const point = get().project.points.find((p) => p.id === pointId);
     if (!point || !point.manualNumber) return;
@@ -3402,12 +3476,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       },
       selectedGroupId: group.id,
       selectedPipelineId: groupPipelineId(group, project),
+      allGroupsOrderVisible: false,
       numberingPreview: {
         visible: true,
         groupId: group.id,
         routePointIds: result.routeIds,
         method: group.numbering.method,
-        displayMode: get().numberingPreview.displayMode ?? 'animated',
+        displayMode: 'full',
         generatedAt: Date.now()
       }
     }));
@@ -3485,12 +3560,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       // строится по текущей группе, если она участвовала в расчёте.
       selectedPipelineId: originalSelectedPipelineId ?? state.selectedPipelineId,
       selectedGroupId: originalSelectedGroupId ?? state.selectedGroupId,
+      allGroupsOrderVisible: true,
       numberingPreview: previewGroup && previewRouteIds.length > 0 ? {
-        visible: true,
+        visible: false,
         groupId: previewGroup.id,
         routePointIds: previewRouteIds,
         method: previewGroup.numbering.method,
-        displayMode: get().numberingPreview.displayMode ?? 'animated',
+        displayMode: 'full',
         generatedAt: Date.now()
       } : EMPTY_NUMBERING_PREVIEW
     }));

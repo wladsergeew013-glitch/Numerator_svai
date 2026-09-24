@@ -1,11 +1,18 @@
 import { useEffect, useState } from 'react';
-import { getCadOperationLog, type CadProgress } from '../api/client';
+import { cancelActiveNanoCadOperation, getCadOperationLog, type CadProgress } from '../api/client';
 import { copyOperationText, formatDuration, formatOperationLog } from '../utils/operationLog';
 
 export function CadOperationProgress({ progress, summary = '' }: { progress: CadProgress; summary?: string }) {
   const [copyStatus, setCopyStatus] = useState('');
   const [manualLog, setManualLog] = useState('');
   const [copying, setCopying] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState('');
+  const stopOperation = async () => {
+    setStopping(true); setStopError('');
+    try { await cancelActiveNanoCadOperation(); }
+    catch (error) { setStopError(error instanceof Error ? error.message : String(error)); setStopping(false); }
+  };
   const copyLog = async () => {
     setCopying(true); setCopyStatus(''); setManualLog('');
     let log;
@@ -24,17 +31,20 @@ export function CadOperationProgress({ progress, summary = '' }: { progress: Cad
   };
   return <div className={`cad-transfer-progress ${progress.status}`}>
     <div role="status" aria-live="polite">
-      <strong>{progress.status === 'running' ? 'Выполняется' : progress.status === 'completed' ? 'Завершено' : 'Ошибка'} · {progress.phase}</strong>
+      <strong>{progress.status === 'running' ? 'Выполняется' : progress.status === 'completed' ? 'Завершено' : progress.status === 'cancelled' ? 'Остановлено' : 'Ошибка'} · {progress.phase}</strong>
     </div>
+    {progress.documentName && <span>Чертёж: <b>{progress.documentName}</b></span>}
     <progress aria-label="Прогресс операции" max={progress.total || 1}
       value={progress.status === 'completed' ? (progress.total || 1) : progress.total ? progress.completed : progress.status === 'failed' ? 0 : undefined} />
-    <span>{progress.total != null ? `Обработано ${progress.completed} из ${progress.total} (${Math.round(progress.completed / Math.max(1, progress.total) * 100)}%)` : progress.status === 'running' ? 'Ожидание ответа nanoCAD…' : progress.status === 'failed' ? 'Операция остановлена' : 'Готово'}
+    <span>{progress.total != null ? `Обработано ${progress.completed} из ${progress.total} (${Math.round(progress.completed / Math.max(1, progress.total) * 100)}%)` : progress.status === 'running' ? 'Ожидание ответа nanoCAD…' : progress.status === 'failed' ? 'Операция завершилась ошибкой' : progress.status === 'cancelled' ? 'Операция остановлена' : 'Готово'}
       {progress.updated != null ? ` · записано ${progress.updated}` : ''}
       {progress.id ? ` · операция ${progress.id.slice(0, 8)}` : ''}</span>
     <div className="cad-operation-log-actions">
       <OperationElapsed progress={progress} />
       <button type="button" className="btn small" disabled={copying} onClick={() => void copyLog()} title="Копирует время, результат, этапы и ошибки этой операции">{copying ? 'Чтение журнала…' : 'Скопировать лог'}</button>
+      {progress.status === 'running' && !progress.kind?.startsWith('file/') && <button type="button" className="btn small danger" disabled={stopping || progress.cancelRequested} onClick={() => void stopOperation()}>{stopping || progress.cancelRequested ? 'Останавливаю…' : 'Остановить'}</button>}
     </div>
+    {stopError && <small role="alert">Не удалось запросить остановку: {stopError}</small>}
     {copyStatus && <small role="status">{copyStatus}</small>}
     {manualLog && <textarea className="cad-operation-log-text" aria-label="Журнал операции для копирования" value={manualLog} readOnly onFocus={event => event.currentTarget.select()} />}
     {progress.status === 'running' && !progress.kind?.startsWith('file/') && <small>Оставьте исходный чертёж открытым до завершения операции.</small>}

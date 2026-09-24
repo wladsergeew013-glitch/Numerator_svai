@@ -2,12 +2,12 @@ import { CommandIcon } from './CommandIcon';
 import { CadOperationProgress } from './CadOperationProgress';
 import { runFileOperation } from '../utils/operationLog';
 import { ChangeEvent, CSSProperties, ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { exportNanoCadBlocks, exportNanoCadModelStudioObjects, getUserConfig, importCsv, importNanoCadBlocks, importNanoCadModelStudioObjects, listLocalProjects, openLocalProject, pickNanoCadBlockSample, saveLocalProject, saveUserConfig, scanNanoCadBlocks, scanNanoCadModelStudioObjects, type CadProgress, type NanoCadBlockSummary, type NanoCadModelStudioObjectSummary } from '../api/client';
+import { CadOperationCancelled, exportNanoCadBlocks, exportNanoCadModelStudioObjects, getUserConfig, importCsv, importNanoCadBlocks, importNanoCadModelStudioObjects, listLocalProjects, openLocalProject, openLocalProjectLocation, pickNanoCadBlockSample, saveLocalProject, saveUserConfig, scanNanoCadBlocks, scanNanoCadModelStudioObjects, type CadProgress, type NanoCadBlockSummary, type NanoCadModelStudioObjectSummary } from '../api/client';
 import { useProjectStore } from '../store/useProjectStore';
 import { LocalProjectInfo, PileGroup, PilePoint, PileProject } from '../types/project';
 import { DraggablePanel } from './DraggablePanel';
-import { newImportPoints } from '../utils/importPoints';
 import { WorkspaceSettingsPanel } from './WorkspaceSettingsPanel';
+import { makeProjectCopy } from '../utils/projectFiles';
 
 interface Props {
   onCsvImport: (file: File) => void;
@@ -24,7 +24,7 @@ const RIBBON_DENSITY_KEY = 'pile-numbering:ribbon-density:v1';
 const DEFAULT_TOOLBAR_HEIGHT = 132;
 const MIN_TOOLBAR_HEIGHT = 124;
 const MAX_TOOLBAR_HEIGHT = 280;
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.3.0';
 const ABOUT_EMAIL = 'vvsergeev@proektirovanie.gazprom.ru';
 
 type RibbonMode = 'tabs' | 'all';
@@ -43,7 +43,7 @@ const TAB_SECTIONS: Record<RibbonTab, SectionId[]> = {
 const TAB_LABELS: Record<RibbonTab, string> = {
   file: 'Файл',
   work: 'Точки и нумерация',
-  settings: 'Настройки',
+  settings: 'Вид',
   history: 'История'
 };
 
@@ -62,7 +62,7 @@ const DENSITY_PRESETS: Record<RibbonDensity, {
   groupMinHeight: number;
   sectionPaddingY: number;
 }> = {
-  compact: { commandWidth: 76, commandHeight: 60, tileWidth: 32, tileHeight: 28, commandGap: 2, groupMinHeight: 64, sectionPaddingY: 3 },
+  compact: { commandWidth: 92, commandHeight: 60, tileWidth: 32, tileHeight: 28, commandGap: 2, groupMinHeight: 64, sectionPaddingY: 3 },
   normal: { commandWidth: 92, commandHeight: 66, tileWidth: 56, tileHeight: 39, commandGap: 5, groupMinHeight: 80, sectionPaddingY: 5 },
   comfortable: { commandWidth: 98, commandHeight: 76, tileWidth: 60, tileHeight: 46, commandGap: 7, groupMinHeight: 92, sectionPaddingY: 7 }
 };
@@ -527,6 +527,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     cancelNumberingPreview,
     closeEditingPanel,
     appendImportedPoints,
+    syncCadImportedPoints,
     updateGroupMeta
   } = useProjectStore();
 
@@ -545,7 +546,8 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const [createProjectName, setCreateProjectName] = useState('Новый проект');
   const [renameProjectOpen, setRenameProjectOpen] = useState(false);
   const [renameProjectName, setRenameProjectName] = useState('');
-  const [importPanelOpen, setImportPanelOpen] = useState(false);
+  const [transferPanelOpen, setTransferPanelOpen] = useState(false);
+  const [transferTab, setTransferTab] = useState<'scan' | 'import' | 'export'>('scan');
   const [importSource, setImportSource] = useState<TransferSource>('file');
   const [importPreview, setImportPreview] = useState<CsvPreviewData | null>(null);
   const [importXColumn, setImportXColumn] = useState('0');
@@ -558,11 +560,14 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const [importBaseX, setImportBaseX] = useState('0');
   const [importBaseY, setImportBaseY] = useState('0');
   const [nanoCadMode, setNanoCadMode] = useState<'blocks' | 'model_studio'>('blocks');
-  const [nanoCadBlockMode, setNanoCadBlockMode] = useState<'scan' | 'pick'>('scan');
   const [nanoCadBlocks, setNanoCadBlocks] = useState<NanoCadBlockSummary[]>([]);
+  const [nanoCadBlockScanId, setNanoCadBlockScanId] = useState<string | null>(null);
+  const [nanoCadBlockScannedAt, setNanoCadBlockScannedAt] = useState<number | null>(null);
   const [nanoCadSelectedBlock, setNanoCadSelectedBlock] = useState('');
   const [nanoCadNumberAttribute, setNanoCadNumberAttribute] = useState('');
   const [nanoCadModelObjects, setNanoCadModelObjects] = useState<NanoCadModelStudioObjectSummary[]>([]);
+  const [nanoCadModelScanId, setNanoCadModelScanId] = useState<string | null>(null);
+  const [nanoCadModelScannedAt, setNanoCadModelScannedAt] = useState<number | null>(null);
   const [nanoCadSelectedModelObject, setNanoCadSelectedModelObject] = useState('');
   const [nanoCadModelNumberParameter, setNanoCadModelNumberParameter] = useState('');
   const [nanoCadModelObjectFilter, setNanoCadModelObjectFilter] = useState('GPP_PILE_NUMBER');
@@ -570,10 +575,10 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const [nanoCadSelectedModelObjectNames, setNanoCadSelectedModelObjectNames] = useState<string[]>([]);
   const [nanoCadModelNumberParameterByObject, setNanoCadModelNumberParameterByObject] = useState<Record<string, string>>({});
   const [nanoCadStatus, setNanoCadStatus] = useState('');
-  const [exportPanelOpen, setExportPanelOpen] = useState(false);
   const [exportTarget, setExportTarget] = useState<ExportTarget>('json');
   const [exportNanoCadMode, setExportNanoCadMode] = useState<'blocks' | 'model_studio'>('blocks');
   const [exportSelectedGroupIds, setExportSelectedGroupIds] = useState<string[]>([]);
+  const [exportAllPoints, setExportAllPoints] = useState(false);
   const [exportUseBasePoint, setExportUseBasePoint] = useState(true);
   const [exportBaseX, setExportBaseX] = useState('0');
   const [exportBaseY, setExportBaseY] = useState('0');
@@ -582,25 +587,28 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const [modelCheckOpen, setModelCheckOpen] = useState(false);
   const [clearLinksPanelOpen, setClearLinksPanelOpen] = useState(false);
   const [cadProgress, setCadProgress] = useState<CadProgress | null>(null);
-  type CadSlot = 'import-scan' | 'export-scan' | 'import' | 'export';
-  const cadSlot = useRef<CadSlot>('import-scan');
+  type CadSlot = 'scan' | 'import' | 'export';
+  const cadSlot = useRef<CadSlot>('scan');
   const [cadProgressBySlot, setCadProgressBySlot] = useState<Partial<Record<CadSlot, CadProgress>>>({});
-  const [scanStatuses, setScanStatuses] = useState({ import: '', export: '' });
+  const [scanStatus, setScanStatus] = useState('');
   const importScanResultRef = useRef<HTMLDivElement>(null);
-  const exportScanResultRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (scanStatuses.import) importScanResultRef.current?.scrollIntoView({ block: 'center' });
-  }, [scanStatuses.import]);
-  useEffect(() => {
-    if (scanStatuses.export) exportScanResultRef.current?.scrollIntoView({ block: 'center' });
-  }, [scanStatuses.export]);
+    if (scanStatus) importScanResultRef.current?.scrollIntoView({ block: 'center' });
+  }, [scanStatus]);
   const beginCad = (slot: CadSlot) => {
     cadSlot.current = slot;
     setCadProgressBySlot(current => { const next = {...current}; delete next[slot]; return next; });
   };
+  const selectCadObjectMode = (mode: 'blocks' | 'model_studio') => {
+    setNanoCadMode(mode);
+    setExportNanoCadMode(mode);
+    setScanStatus('');
+    setCadProgressBySlot(current => { const next = {...current}; delete next.scan; return next; });
+  };
   const [scanScope, setScanScope] = useState<'auto' | 'selection' | 'all'>('auto');
   const [saveDrawing, setSaveDrawing] = useState(false);
   const [preserveHandles, setPreserveHandles] = useState(true);
+  const [overwriteImportedNumbers, setOverwriteImportedNumbers] = useState(false);
   const [exportMatchMode, setExportMatchMode] = useState<'auto' | 'coordinates' | 'handles'>('auto');
   const [exportFilterObjectTypes, setExportFilterObjectTypes] = useState(false);
   const cadRunning = cadProgress?.status === 'running';
@@ -614,7 +622,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     window.addEventListener('cad-progress', listener);
     return () => window.removeEventListener('cad-progress', listener);
   }, []);
-  const scanScopeView = <label className="cad-scope"><span>Область сканирования и обмена</span><select value={scanScope} disabled={cadRunning} onChange={(e) => setScanScope(e.target.value as 'auto' | 'selection' | 'all')}>
+  const scanScopeView = <label className="cad-scope"><span>Область сканирования и обмена</span><select value={scanScope} disabled={cadRunning} onChange={(e) => { setScanScope(e.target.value as 'auto' | 'selection' | 'all'); setNanoCadModelScanId(null); setNanoCadBlockScanId(null); setNanoCadModelScannedAt(null); setNanoCadBlockScannedAt(null); setNanoCadBlocks([]); setNanoCadModelObjects([]); setScanStatus('Область изменена. Запустите скан снова.'); }}>
     <option value="auto">Выделенные объекты; если выделения нет — весь чертёж</option>
     <option value="selection">Только выделенные в nanoCAD</option>
     <option value="all">Весь чертёж</option>
@@ -622,8 +630,17 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const renderCadProgress = (progress: CadProgress | undefined, summary = '') => progress && (
     <CadOperationProgress key={progress.id ?? progress.startedAt} progress={progress} summary={summary} />
   );
+  const scanResultLabel = (mode: 'blocks' | 'model_studio') => {
+    const scannedAt = mode === 'blocks' ? nanoCadBlockScannedAt : nanoCadModelScannedAt;
+    const kind = mode === 'blocks' ? 'блоков' : 'Model Studio';
+    if (!scannedAt) return `Скан ${kind} ещё не выполнен.`;
+    const count = mode === 'blocks' ? nanoCadBlocks.length : nanoCadModelObjects.length;
+    const snapshotAvailable = mode === 'blocks' ? Boolean(nanoCadBlockScanId) : Boolean(nanoCadModelScanId);
+    return `Скан ${kind}: ${new Date(scannedAt).toLocaleString('ru-RU')} · типов ${count}. ${snapshotAvailable ? 'Снимок готов для импорта и экспорта.' : 'Снимок уже недоступен; для повторного чтения обновите скан.'}`;
+  };
 
   const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const openProjectInputRef = useRef<HTMLInputElement | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const ribbonScrollRef = useRef<HTMLDivElement | null>(null);
   const ribbonScrollLeftRef = useRef(0);
@@ -773,31 +790,26 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     );
   };
 
-  const downloadProjectJson = async () => {
+  const writeProjectJson = async (asCopy: boolean) => {
     const report = (message: string) => { setProjectStatus(message); return message; };
     const { gridSettings: _gridSettings, viewSettings: _viewSettings, ...projectPayload } = project;
-    const fileName = `${safeFileName(project.project.name || 'project')}.pilenum.json`;
-    const jsonText = JSON.stringify(projectPayload, null, 2);
+    const fileName = `${safeFileName(project.project.name || 'project')}${asCopy ? '_копия' : ''}.pilenum.json`;
+    const jsonText = JSON.stringify(asCopy ? makeProjectCopy(project) : projectPayload, null, 2);
     const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+    const success = (path: string) => {
+      if (!asCopy) useProjectStore.getState().markProjectSaved(project);
+      return report(asCopy ? `Копия проекта сохранена: ${path}. Текущий проект не изменён.` : `Экспортирован JSON: ${path}`);
+    };
 
     const desktopApi = (window as unknown as {
       pywebview?: { api?: { saveProjectJson?: (fileName: string, content: string) => Promise<{ saved?: boolean; path?: string; canceled?: boolean; error?: string }> } };
     }).pywebview?.api;
 
     if (desktopApi?.saveProjectJson) {
-      try {
-        const result = await desktopApi.saveProjectJson(fileName, jsonText);
-        if (result?.saved) {
-          useProjectStore.getState().markProjectSaved(project);
-          return report(`Экспортирован JSON: ${result.path || fileName}`);
-        }
-        if (result?.canceled) {
-          return report('Экспорт JSON отменён пользователем.');
-        }
-        if (result?.error) throw new Error(result.error);
-      } catch (error) {
-        console.warn('pywebview JSON export failed, trying browser save picker', error);
-      }
+      const result = await desktopApi.saveProjectJson(fileName, jsonText);
+      if (result?.saved) return success(result.path || fileName);
+      if (result?.canceled) return report(asCopy ? 'Сохранение копии отменено.' : 'Экспорт JSON отменён пользователем.');
+      throw new Error(result?.error || 'Не удалось сохранить файл проекта.');
     }
 
     const picker = (window as unknown as {
@@ -816,11 +828,10 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
         const writable = await handle.createWritable();
         await writable.write(blob);
         await writable.close();
-        useProjectStore.getState().markProjectSaved(project);
-        return report(`Экспортирован JSON: ${fileName}`);
+        return success(fileName);
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
-          return report('Экспорт JSON отменён пользователем.');
+          return report(asCopy ? 'Сохранение копии отменено.' : 'Экспорт JSON отменён пользователем.');
         }
         console.warn('showSaveFilePicker failed, falling back to link download', error);
       }
@@ -834,7 +845,12 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-    return report(`JSON передан браузеру для сохранения: ${fileName}`);
+    return report(asCopy ? `Копия проекта передана браузеру для сохранения: ${fileName}` : `JSON передан браузеру для сохранения: ${fileName}`);
+  };
+  const downloadProjectJson = () => writeProjectJson(false);
+  const saveProjectAsCopy = async () => {
+    try { await writeProjectJson(true); }
+    catch (error) { setProjectStatus(error instanceof Error ? error.message : 'Не удалось сохранить копию проекта.'); }
   };
 
   const openCreateProjectDialog = () => {
@@ -877,16 +893,20 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   };
 
   const openImportDialog = () => {
-    setImportPanelOpen(true);
+    setTransferPanelOpen(true);
+    setTransferTab('import');
     setImportSource('file');
     setImportStatus('');
+    setOverwriteImportedNumbers(false);
   };
 
   const openExportDialog = () => {
-    setExportPanelOpen(true);
+    setTransferPanelOpen(true);
+    setTransferTab('export');
     setExportTarget('json');
     setExportStatus('');
-    if (project.groups.length && exportSelectedGroupIds.length === 0) setExportSelectedGroupIds(project.groups.map((group) => group.id));
+    setExportAllPoints(project.groups.length === 0);
+    setExportSelectedGroupIds(project.groups.map((group) => group.id));
     setProjectStatus('');
   };
 
@@ -963,39 +983,42 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   };
 
 
-  const setNanoCadTransferStatus = (target: 'import' | 'export', message: string) => {
-    setScanStatuses(current => ({ ...current, [target]: message }));
-  };
+  const setNanoCadTransferStatus = (message: string) => setScanStatus(message);
 
-  const refreshNanoCadBlocks = async (target: 'import' | 'export' = 'import') => {
-    beginCad(target === 'import' ? 'import-scan' : 'export-scan');
+  const refreshNanoCadBlocks = async () => {
+    beginCad('scan');
+    setNanoCadBlockScanId(null);
+    setNanoCadBlockScannedAt(null);
+    setNanoCadBlocks([]);
     try {
-      setNanoCadTransferStatus(target, 'Подключаюсь к nanoCAD и читаю блоки...');
+      setNanoCadTransferStatus('Подключаюсь к nanoCAD и читаю блоки...');
       const data = await scanNanoCadBlocks(scanScope);
+      setNanoCadBlockScanId(data.scanId ?? null);
+      setNanoCadBlockScannedAt(Date.now());
       setNanoCadBlocks(data.blocks);
       const first = data.blocks[0];
       if (first) {
         setNanoCadSelectedBlock((current) => current || first.name);
         setNanoCadNumberAttribute((current) => current || first.numberAttributeCandidates[0] || first.attributes[0]?.tag || '');
       }
-      setNanoCadTransferStatus(target, `Скан блоков готов (${data.scope === 'selection' ? 'выделение' : 'весь чертёж'}): найдено типов ${data.blocks.length}${data.documentName ? ` · ${data.documentName}` : ''}`);
+      setNanoCadTransferStatus(`Скан блоков готов (${data.scope === 'selection' ? 'выделение' : 'весь чертёж'}): найдено типов ${data.blocks.length}${data.documentName ? ` · ${data.documentName}` : ''}`);
     } catch (e) {
-      setNanoCadTransferStatus(target, e instanceof Error ? e.message : 'Не удалось прочитать блоки nanoCAD.');
+      setNanoCadTransferStatus(e instanceof Error ? e.message : 'Не удалось прочитать блоки nanoCAD.');
     }
   };
 
-  const pickNanoCadSample = async (target: 'import' | 'export' = 'import') => {
-    beginCad(target === 'import' ? 'import-scan' : 'export-scan');
+  const pickNanoCadSample = async () => {
+    beginCad('scan');
     try {
-      setNanoCadTransferStatus(target, 'Жду выбора блока в nanoCAD...');
+      setNanoCadTransferStatus('Жду выбора блока в nanoCAD...');
       const picked = await pickNanoCadBlockSample();
       setNanoCadSelectedBlock(picked.blockName);
       setNanoCadNumberAttribute(picked.numberAttributeCandidates[0] || Object.keys(picked.attributes)[0] || '');
-      setNanoCadTransferStatus(target, `Выбран образец блока: ${picked.blockName}. Сканирую все такие блоки.`);
-      await refreshNanoCadBlocks(target);
+      setNanoCadTransferStatus(`Выбран образец блока: ${picked.blockName}. Сканирую все такие блоки.`);
+      await refreshNanoCadBlocks();
       setNanoCadSelectedBlock(picked.blockName);
     } catch (e) {
-      setNanoCadTransferStatus(target, e instanceof Error ? e.message : 'Не удалось выбрать блок в nanoCAD.');
+      setNanoCadTransferStatus(e instanceof Error ? e.message : 'Не удалось выбрать блок в nanoCAD.');
     }
   };
 
@@ -1027,7 +1050,6 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     obj?.numberParameterCandidates.find((name) => name.toUpperCase() === 'GPP_PILE_NUMBER') ||
     obj?.numberParameterCandidates[0] ||
     obj?.parameters.find((param) => param.name.toUpperCase() === 'GPP_PILE_NUMBER')?.name ||
-    obj?.parameters[0]?.name ||
     ''
   );
 
@@ -1043,8 +1065,6 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const selectModelStudioMainObject = (name: string) => {
     setNanoCadSelectedModelObject(name);
     setNanoCadSelectedModelObjectNames((items) => items.includes(name) ? items : [...items, name]);
-    const parameter = modelStudioNumberParameterForObject(name);
-    setNanoCadModelNumberParameter(parameter);
   };
 
   const toggleModelStudioObjectSelection = (name: string, checked: boolean) => {
@@ -1052,11 +1072,16 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     if (checked) selectModelStudioMainObject(name);
   };
 
-  const refreshNanoCadModelStudioObjects = async (target: 'import' | 'export' = 'import') => {
-    beginCad(target === 'import' ? 'import-scan' : 'export-scan');
+  const refreshNanoCadModelStudioObjects = async () => {
+    beginCad('scan');
+    setNanoCadModelScanId(null);
+    setNanoCadModelScannedAt(null);
+    setNanoCadModelObjects([]);
     try {
-      setNanoCadTransferStatus(target, 'Подключаюсь к nanoCAD и читаю объекты Model Studio...');
+      setNanoCadTransferStatus('Подключаюсь к nanoCAD и читаю объекты Model Studio...');
       const data = await scanNanoCadModelStudioObjects(scanScope);
+      setNanoCadModelScanId(data.scanId ?? null);
+      setNanoCadModelScannedAt(Date.now());
       setNanoCadModelObjects(data.objects);
       const defaultParams = Object.fromEntries(data.objects.map((obj) => [obj.name, defaultModelStudioParameter(obj)]));
       setNanoCadModelNumberParameterByObject(defaultParams);
@@ -1065,7 +1090,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
       if (first) {
         setNanoCadSelectedModelObject(first.name);
         setNanoCadSelectedModelObjectNames(selectedByDefault.length ? selectedByDefault : [first.name]);
-        setNanoCadModelNumberParameter(defaultModelStudioParameter(first));
+        setNanoCadModelNumberParameter('');
       } else {
         setNanoCadSelectedModelObject('');
         setNanoCadSelectedModelObjectNames([]);
@@ -1073,23 +1098,31 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
       }
       const withCoords = data.objects.reduce((sum, obj) => sum + (obj.coordinateCount ?? 0), 0);
       const total = data.objects.reduce((sum, obj) => sum + obj.count, 0);
-      setNanoCadTransferStatus(target, `Скан Model Studio готов (${data.scope === 'selection' ? 'выделение' : 'весь чертёж'}): групп ${data.objects.length}, объектов ${total}, с координатами ${withCoords}${data.documentName ? ` · ${data.documentName}` : ''}`);
+      const missingParameters = data.objects.reduce((sum, obj) => sum + (obj.missingNumberParameter ?? 0), 0);
+      setNanoCadTransferStatus(`Скан Model Studio готов (${data.scope === 'selection' ? 'выделение' : 'весь чертёж'}): групп ${data.objects.length}, объектов ${total}, с координатами ${withCoords}${missingParameters ? ` · без ожидаемого параметра номера ${missingParameters}` : ''}${data.documentName ? ` · ${data.documentName}` : ''}`);
     } catch (e) {
-      setNanoCadTransferStatus(target, e instanceof Error ? e.message : 'Не удалось прочитать объекты Model Studio.');
+      setNanoCadTransferStatus(e instanceof Error ? e.message : 'Не удалось прочитать объекты Model Studio.');
     }
   };
 
   const selectedExportGroups = useMemo(() => {
-    if (exportSelectedGroupIds.length === 0) return project.groups;
     const selected = new Set(exportSelectedGroupIds);
     return project.groups.filter((group) => selected.has(group.id));
   }, [exportSelectedGroupIds, project.groups]);
 
   const exportPoints = useMemo(() => {
-    if (exportSelectedGroupIds.length === 0) return project.points;
+    if (exportAllPoints) return project.points;
     const selected = new Set(exportSelectedGroupIds);
     return project.points.filter((point) => point.groupId && selected.has(point.groupId));
-  }, [exportSelectedGroupIds, project.points]);
+  }, [exportAllPoints, exportSelectedGroupIds, project.points]);
+  const exportMappableObjects = useMemo(() => {
+    const names = new Set(exportPoints.map(point => String(point.meta?.objectName ?? '').trim()).filter(Boolean));
+    return nanoCadModelObjects.filter(obj => names.has(obj.name));
+  }, [exportPoints, nanoCadModelObjects]);
+  const exportStoredParameterCount = exportPoints.filter(point =>
+    String(point.meta?.numberParameter ?? '').trim() && String(point.meta?.objectName ?? '').trim()).length;
+  const exportHasModelParameter = Boolean(nanoCadModelNumberParameter.trim() || exportStoredParameterCount ||
+    exportMappableObjects.some(obj => modelStudioNumberParameterForObject(obj.name).trim()));
 
   const parseExportBase = () => {
     const baseX = exportUseBasePoint ? parseImportNumber(exportBaseX) : 0;
@@ -1123,8 +1156,9 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
 
         );
         setNanoCadStatus('Импортирую выбранные объекты Model Studio из nanoCAD...');
-        const points = await importNanoCadModelStudioObjects({
+        const imported = await importNanoCadModelStudioObjects({
           scope: scanScope,
+          scanId: nanoCadModelScanId,
           preserveHandles,
           objectName: selectedObjectNames.length === 1 ? selectedObjectNames[0] : null,
           selectedObjectNames,
@@ -1135,10 +1169,11 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
           tolerance: 1
         });
 
-        const added = newImportPoints(useProjectStore.getState().project.points, points);
-        appendImportedPoints('nanoCAD:ModelStudio', added);
-        setNanoCadStatus(`Импорт Model Studio: добавлено ${added.length}, уже есть в проекте ${points.length - added.length}. Готовые точки и номера сохранены.`);
-        setProjectStatus(`Импорт Model Studio: добавлено ${added.length}`);
+        const sync = syncCadImportedPoints('nanoCAD:ModelStudio', imported.points, overwriteImportedNumbers);
+        setOverwriteImportedNumbers(false);
+        const missingParameters = imported.diagnostics?.missingNumberParameter ?? 0;
+        setNanoCadStatus(`Импорт Model Studio${imported.diagnostics?.reusedScan ? ' из скана' : ''}: добавлено ${sync.added.length}, перемещено ${sync.moved.length}, привязано ${sync.linked.length}, номеров обновлено ${sync.renumbered.length}, без изменений ${sync.unchanged}${missingParameters ? `; у ${missingParameters} объектов нет выбранного параметра номера` : ''}. Группы существующих точек сохранены.`);
+        setProjectStatus(`Импорт Model Studio: +${sync.added.length}, перемещено ${sync.moved.length}, привязано ${sync.linked.length}`);
         requestAnimationFrame(() => zoomExtents(canvasWidth, canvasHeight));
         return;
       }
@@ -1148,19 +1183,20 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
         return;
       }
       setNanoCadStatus('Импортирую блоки из nanoCAD...');
-      const points = await importNanoCadBlocks({
-        scope: scanScope,
+        const points = await importNanoCadBlocks({
+          scope: scanScope,
+          scanId: nanoCadBlockScanId,
         blockName: nanoCadSelectedBlock,
         numberAttribute: nanoCadNumberAttribute || null,
         baseX,
         baseY,
         tolerance: 1
       });
-      const added = newImportPoints(useProjectStore.getState().project.points, points);
-      appendImportedPoints(`nanoCAD:${nanoCadSelectedBlock}`, added);
+      const sync = syncCadImportedPoints(`nanoCAD:${nanoCadSelectedBlock}`, points, overwriteImportedNumbers);
+      setOverwriteImportedNumbers(false);
       requestAnimationFrame(() => zoomExtents(canvasWidth, canvasHeight));
-      setNanoCadStatus(`Добавлено блоков: ${added.length}; уже есть в проекте: ${points.length - added.length}. Атрибут номера: ${nanoCadNumberAttribute || 'не задан'}.`);
-      setProjectStatus(`Импорт из nanoCAD: ${nanoCadSelectedBlock} · ${added.length} точек`);
+      setNanoCadStatus(`Блоки${nanoCadBlockScanId ? ' из скана' : ''}: добавлено ${sync.added.length}, перемещено ${sync.moved.length}, привязано ${sync.linked.length}, номеров обновлено ${sync.renumbered.length}, без изменений ${sync.unchanged}. Атрибут номера: ${nanoCadNumberAttribute || 'не задан'}.`);
+      setProjectStatus(`Импорт из nanoCAD: ${nanoCadSelectedBlock} · +${sync.added.length}, перемещено ${sync.moved.length}, привязано ${sync.linked.length}`);
     } catch (e) {
       setNanoCadStatus(e instanceof Error ? e.message : 'Не удалось импортировать данные nanoCAD.');
     }
@@ -1187,38 +1223,52 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
         groupId: point.groupId ?? null,
         meta: point.meta ?? {}
       }));
-      const modelStudioExportObjectNames = exportFilterObjectTypes ? selectedModelStudioObjectNamesForRequest() : [];
+      const mappableNames = new Set(exportMappableObjects.map(obj => obj.name));
+      const modelStudioExportObjectNames = exportFilterObjectTypes ? selectedModelStudioObjectNamesForRequest().filter(name => mappableNames.has(name)) : [];
       if (exportNanoCadMode === 'model_studio' && exportFilterObjectTypes && modelStudioExportObjectNames.length === 0) {
         throw new Error('Выберите хотя бы один тип объектов или отключите ограничение по типам.');
       }
       const result = exportNanoCadMode === 'blocks'
         ? await exportNanoCadBlocks({
             scope: scanScope,
+            scanId: nanoCadBlockScanId,
             blockName: nanoCadSelectedBlock,
             numberAttribute: nanoCadNumberAttribute,
             points: payloadPoints,
             baseX,
             baseY,
             tolerance,
-            selectedGroupIds: exportSelectedGroupIds.length ? exportSelectedGroupIds : null
+            selectedGroupIds: exportAllPoints ? null : exportSelectedGroupIds
           })
         : await exportNanoCadModelStudioObjects({
             saveDrawing,
             scope: scanScope,
+            scanId: nanoCadModelScanId,
             matchMode: exportMatchMode,
             objectName: modelStudioExportObjectNames.length === 1 ? modelStudioExportObjectNames[0] : null,
             selectedObjectNames: modelStudioExportObjectNames,
             numberParameter: nanoCadModelNumberParameter,
+            selectedObjectParameters: Object.fromEntries(exportMappableObjects.map(obj => [obj.name, modelStudioNumberParameterForObject(obj.name)])),
             points: payloadPoints,
             baseX,
             baseY,
             tolerance,
-            selectedGroupIds: exportSelectedGroupIds.length ? exportSelectedGroupIds : null
+            selectedGroupIds: exportAllPoints ? null : exportSelectedGroupIds
           });
-      const message = `${result.updated === 0 ? 'Ничего не записано. Проверьте чертёж, тип объектов, координаты и наличие итоговых номеров. ' : ''}Экспорт nanoCAD: обновлено ${result.updated}, сопоставлено ${result.matched}/${result.scanned}, неиспользованных точек ${result.unusedPoints}. Ошибок записи: ${result.failedWrites ?? result.missingAttribute ?? result.missingParameter ?? 0}; не найдены handle: ${result.unresolvedHandles ?? 0}. ${result.saved ? 'DWG сохранён.' : result.updated > 0 ? 'Изменения в открытом чертеже — сохраните DWG в nanoCAD.' : ''}${result.saveError ? ` Ошибка сохранения: ${result.saveError}.` : ''}${result.logFile ? ` Лог: ${result.logFile}` : ''}`;
+      const message = `${result.updated === 0 ? 'Ничего не записано. Проверьте чертёж, тип объектов, координаты и наличие итоговых номеров. ' : ''}Экспорт nanoCAD${result.reusedScan ? ' из скана' : ''}: обновлено ${result.updated}, сопоставлено ${result.matched}/${result.scanned}, неиспользованных точек ${result.unusedPoints}. Ошибок записи: ${result.failedWrites ?? result.missingAttribute ?? result.missingParameter ?? 0}; не найдены handle: ${result.unresolvedHandles ?? 0}. ${result.saved ? 'DWG сохранён.' : result.updated > 0 ? 'Изменения в открытом чертеже — сохраните DWG в nanoCAD.' : ''}${result.saveError ? ` Ошибка сохранения: ${result.saveError}.` : ''}${result.logFile ? ` Лог: ${result.logFile}` : ''}`;
+      if (result.updated > 0) {
+        if (exportNanoCadMode === 'blocks') setNanoCadBlockScanId(null);
+        else setNanoCadModelScanId(null);
+        setNanoCadTransferStatus('После записи в DWG обновите скан, чтобы импорт прочитал актуальные значения.');
+      }
       setExportStatus(message);
       setProjectStatus(message);
     } catch (e) {
+      if (e instanceof CadOperationCancelled) {
+        setNanoCadBlockScanId(null);
+        setNanoCadModelScanId(null);
+        setScanStatus('Экспорт остановлен. Часть номеров могла остаться в открытом DWG; перед следующим обменом обновите скан.');
+      }
       setExportStatus(e instanceof Error ? e.message : 'Не удалось экспортировать в nanoCAD.');
     }
   };
@@ -1278,6 +1328,15 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     }
   };
 
+  const showProjectLocation = async (fileName?: string) => {
+    try {
+      const result = await openLocalProjectLocation(fileName);
+      setProjectStatus(`Открыто расположение: ${result.path}`);
+    } catch (error) {
+      setProjectStatus(error instanceof Error ? error.message : 'Не удалось открыть расположение проекта.');
+    }
+  };
+
   const openProjectFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const input = e.currentTarget;
     const file = input.files?.[0];
@@ -1292,6 +1351,25 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
       setProjectStatus(error instanceof Error ? error.message : 'Не удалось открыть файл проекта');
     } finally {
       input.value = '';
+    }
+  };
+
+  const openProjectCommand = async () => {
+    const desktopApi = (window as unknown as {
+      pywebview?: { api?: { openProjectJson?: () => Promise<{ opened?: boolean; path?: string; fileName?: string; content?: string; canceled?: boolean; error?: string }> } };
+    }).pywebview?.api;
+    if (!desktopApi?.openProjectJson) {
+      openProjectInputRef.current?.click();
+      return;
+    }
+    try {
+      const result = await desktopApi.openProjectJson();
+      if (result?.canceled) return;
+      if (!result?.opened || !result.fileName || !result.content) throw new Error(result?.error || 'Не удалось открыть файл проекта.');
+      openProjectFromFile(JSON.parse(result.content) as PileProject, result.fileName);
+      setProjectStatus(`Открыт проект: ${result.path || result.fileName}`);
+    } catch (error) {
+      setProjectStatus(error instanceof Error ? error.message : 'Не удалось открыть файл проекта.');
     }
   };
 
@@ -1468,10 +1546,10 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                 <div className="file-ribbon-group-title">Проект</div>
                 <div className="ribbon-commands">
                   <CommandButton icon="✚" label="Создать" active={createProjectOpen} tooltip={'Создать проект\nОткрывает окно создания нового пустого проекта.'} onClick={openCreateProjectDialog} />
-                  <CommandButton icon="📂" label="Открыть" tooltip={'Открыть проект\nОткрывает готовый .pilenum.json или .json файл как текущий проект.'}>
-                    <input type="file" accept=".json,.pilenum.json" hidden onChange={(e) => void openProjectFile(e)} />
-                  </CommandButton>
+                  <CommandButton icon="📂" label="Открыть" tooltip={'Открыть проект\nВ приложении начинает выбор из папки projects рядом с EXE и запоминает выбранную папку до перезапуска.'} onClick={() => void openProjectCommand()} />
+                  <input ref={openProjectInputRef} type="file" accept=".json,.pilenum.json" hidden onChange={(e) => void openProjectFile(e)} />
                   <CommandButton icon="💽" label="Сохранить" tooltip={'Сохранить проект\nСохраняет текущий проект в локальную папку projects. Для нового проекта берёт имя из строки проекта.'} onClick={() => void saveProjectToLocalFolder()} />
+                  <CommandButton icon="save-as" label="Сохранить как" tooltip={'Сохранить как\nСоздаёт независимую копию проекта в выбранном месте. Текущий проект остаётся открытым.'} onClick={() => void saveProjectAsCopy()} />
                   <CommandButton icon="✎" label="Имя проекта" active={renameProjectOpen} tooltip={'Переименовать проект\nМеняет имя текущего проекта. При следующем сохранении локальный файл получит новое имя.'} onClick={openRenameProjectDialog} />
                   <CommandButton icon="🗂" label="Проекты" active={projectsOpen} tooltip={'Папка проектов\nОткрывает список локальных проектов из папки projects. Выбранный проект подсвечивается.'} onClick={() => void toggleProjectsPopover()} />
                 </div>
@@ -1479,8 +1557,8 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
               <div className="file-ribbon-group">
                 <div className="file-ribbon-group-title">Данные</div>
                 <div className="ribbon-commands">
-                  <CommandButton icon="➕" label="Импорт" active={importPanelOpen} tooltip={'Импорт данных\nCSV/Excel с предпросмотром, импорт блоков nanoCAD и подготовка объектов Model Studio.'} onClick={openImportDialog} />
-                  <CommandButton icon="📤" label="Экспорт" active={exportPanelOpen} tooltip={'Экспорт данных\nСохраняет JSON проекта или записывает номера обратно в nanoCAD.'} onClick={openExportDialog} />
+                  <CommandButton icon="➕" label="Импорт" active={transferPanelOpen && transferTab === 'import'} tooltip={'Импорт данных\nCSV/Excel и nanoCAD. Скан nanoCAD находится в соседней вкладке общего окна обмена.'} onClick={openImportDialog} />
+                  <CommandButton icon="📤" label="Экспорт" active={transferPanelOpen && transferTab === 'export'} tooltip={'Экспорт данных\nJSON проекта или запись номеров в nanoCAD из общего окна обмена.'} onClick={openExportDialog} />
                 </div>
               </div>
             </div>
@@ -1527,10 +1605,10 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
               <div className="ribbon-command-subgroup ribbon-command-subgroup-links">
                 <div className="ribbon-subtitle">Связи / просмотр</div>
                 <div className="ribbon-subcommands">
-                  <CommandButton icon="⛓" label="Порядок" active={allGroupsOrderVisible || (numberingPreview.visible && numberingPreview.displayMode === 'full')} tooltip={'Порядок нумерации\nДля выбранной группы — её маршрут. Если снять выбор группы — маршруты всех групп. По стрелке можно кликнуть, затем выбрать новую точку-приёмник для ручной связи.'} onClick={() => setNumberingPreviewMode('full')} />
+                  <CommandButton icon="route" label="Весь путь" active={allGroupsOrderVisible || (numberingPreview.visible && numberingPreview.displayMode === 'full')} tooltip={'Показать весь путь нумерации\nДля выбранной группы показывает её маршрут. Без выбранной группы показывает маршруты всех групп. По стрелке можно выбрать новую точку-приёмник для ручной связи.'} onClick={() => setNumberingPreviewMode('full')} />
                   <CommandButton icon={numberingPreview.visible && numberingPreview.displayMode === 'animated' ? '⏸' : '▶'} label={numberingPreview.visible && numberingPreview.displayMode === 'animated' ? 'Пауза' : 'Анимация'} active={numberingPreview.visible && (numberingPreview.displayMode === 'animated' || numberingPreview.displayMode === 'paused')} tooltip={'Анимация / пауза\nПервое нажатие запускает анимацию порядка. Повторное нажатие ставит паузу или продолжает анимацию.'} onClick={toggleNumberingAnimation} />
                   <div className="clear-links-anchor">
-                    <CommandButton icon="🧹" label="Убрать связи" active={clearLinksPanelOpen} tooltip={'Очистить ручные связи\nОткроет панель выбора: красным подсветятся связи, которые будут удалены.'} onClick={showClearLinksPanel} />
+                    <CommandButton icon="unlink" label="Убрать связи" active={clearLinksPanelOpen} tooltip={'Очистить ручные связи\nОткроет панель выбора: красным подсветятся связи, которые будут удалены.'} onClick={showClearLinksPanel} />
                     {clearLinksPanelOpen && (
                       <div className="clear-links-popover">
                         <strong>Ручные связи</strong>
@@ -1567,8 +1645,8 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
               <div className="ribbon-command-subgroup ribbon-command-subgroup-apply">
                 <div className="ribbon-subtitle">Применить</div>
                 <div className="ribbon-subcommands">
-                  <CommandButton icon="№" label="№ группы" tooltip={'Нумеровать группу\nПрименяет выбранный метод нумерации только к активной группе.'} onClick={() => void applyRowsNumbering()} />
-                  <CommandButton icon="№№" label="№ всех" tooltip={'Нумеровать всё\nНумерует все группы по порядку диспетчера.'} onClick={() => void applyRowsNumberingAll()} />
+                  <CommandButton icon="№" label="Нумеровать группу" tooltip={'Нумеровать группу\nПрименяет выбранный метод нумерации только к активной группе и показывает весь её путь.'} onClick={() => void applyRowsNumbering()} />
+                  <CommandButton icon="№" label="Нумеровать все" tooltip={'Нумеровать все группы\nНумерует все группы по порядку диспетчера и показывает все маршруты.'} onClick={() => void applyRowsNumberingAll()} />
                 </div>
               </div>
             </div>
@@ -1582,8 +1660,9 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                   <CommandButton icon="⛶" label="Всё поле" tooltip={'Zoom Extents\nЦентрирует и масштабирует поле так, чтобы увидеть все точки.'} onClick={() => zoomExtents(canvasWidth, canvasHeight)} />
                   <CommandButton icon="#" label="Сетка" active={project.gridSettings.enabled} tooltip={'Сетка\nВключает или выключает вспомогательную сетку. Главные оси X/Y остаются отдельно.'} onClick={toggleGrid} />
                   <CommandButton icon="12" label="Номера" active={project.viewSettings.showPointNumbers} tooltip={'Показать номера точек\nВключает или скрывает текст нумерации на поле.'} onClick={() => updateViewSettings({ showPointNumbers: !project.viewSettings.showPointNumbers })} />
-                  <CommandButton icon="▤" label="Номера групп" active={project.viewSettings.showGroupNumbers === true} tooltip={'Номера групп\nПоказывает порядковый номер группы на общей схеме. Название группы остаётся независимым.'} onClick={() => updateViewSettings({ showGroupNumbers: !project.viewSettings.showGroupNumbers })} />
+                  <CommandButton icon="▤" label="Номера групп" active={project.viewSettings.showGroupNumbers === true} tooltip={'Номера групп\nПоказывает порядковый номер группы на схеме. Подпись можно перетащить мышью; её положение сохраняется в проекте.'} onClick={() => updateViewSettings({ showGroupNumbers: !project.viewSettings.showGroupNumbers })} />
                   <CommandButton icon="group-flow" label="Связи групп" active={project.viewSettings.showGroupFlow === true} tooltip={'Старт, финиш и связи групп\nГолубая обводка — старт, оранжевая — финиш. Пунктирные стрелки соединяют финиш и следующий старт в порядке групп каждого пайплайна. Нумерацию не меняет.'} onClick={() => updateViewSettings({ showGroupFlow: !project.viewSettings.showGroupFlow })} />
+                  <CommandButton icon="group-focus" label="Фокус группы" active={project.viewSettings.dimOtherGroups === true} tooltip={'Фокус группы\nКогда выбрана группа, её точки остаются яркими, остальные показаны точками без подписей, а их маршруты скрыты. Повторное нажатие возвращает обычный вид.'} onClick={() => updateViewSettings({ dimOtherGroups: !project.viewSettings.dimOtherGroups })} />
                   <CommandButton icon="○!" label="Без номера" active={project.viewSettings.highlightUnnumbered} tooltip={'Проверить пустые\nВыделяет все точки без номера, затемняет остальные точки и выключает временные режимы предпросмотра/редактирования.'} onClick={toggleEmptyPointCheck} />
                   <CommandButton icon="✓" label="Проверка" active={modelCheckOpen} tooltip={'Проверка модели\nПоказывает сводку по точкам, группам, ненумерованным точкам, дублям и ручным связям.'} onClick={() => setModelCheckOpen((value) => !value)} />
                   <CommandButton icon="⚙" label="Настройки" active={workspaceOpen} tooltip={'Настройки рабочего поля\nОткрывает отдельное перемещаемое окно настроек.'} onClick={() => setWorkspaceOpen((value) => !value)} />
@@ -1671,10 +1750,11 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
         </DraggablePanel>
       )}
 
-      {importPanelOpen && (
+      {transferPanelOpen && (
         <DraggablePanel
-          id="import-data-dialog"
-          title="Импорт данных"
+          id="cad-transfer-dialog"
+          className="cad-transfer-dialog"
+          title="Обмен данными"
           initialX={38}
           initialY={toolbarHeight + 18}
           width={720}
@@ -1684,9 +1764,40 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
           dockable
           dockOffsetTop={toolbarHeight}
           dockOffsetBottom={28}
-          onClose={() => setImportPanelOpen(false)}
+          onClose={() => setTransferPanelOpen(false)}
         >
+          <nav className="transfer-tabbar" aria-label="Разделы обмена данными">
+            <button className={transferTab === 'scan' ? 'active' : ''} onClick={() => setTransferTab('scan')}>Скан</button>
+            <button className={transferTab === 'import' ? 'active' : ''} onClick={() => setTransferTab('import')}>Импорт</button>
+            <button className={transferTab === 'export' ? 'active' : ''} onClick={() => setTransferTab('export')}>Экспорт</button>
+          </nav>
+          {transferTab === 'scan' && (
+            <div className="transfer-dialog-panel import-wizard-panel transfer-scan-panel">
+              <div className="wizard-step"><div className="wizard-step-title"><b>1</b><span>Что читать из nanoCAD</span></div>
+                <div className="transfer-mode-grid compact">
+                  <button disabled={cadRunning} className={`transfer-mode-card ${nanoCadMode === 'blocks' ? 'active' : ''}`} onClick={() => selectCadObjectMode('blocks')}><strong>Блоки</strong><span>Координаты, handle и атрибуты блоков.</span></button>
+                  <button disabled={cadRunning} className={`transfer-mode-card ${nanoCadMode === 'model_studio' ? 'active' : ''}`} onClick={() => selectCadObjectMode('model_studio')}><strong>Model Studio</strong><span>Координаты, handle и параметры свай.</span></button>
+                </div>
+              </div>
+              <div className="wizard-step"><div className="wizard-step-title"><b>2</b><span>Область и обновление</span></div>
+                {scanScopeView}
+                <div className="dialog-actions-row left">
+                  <button className="btn primary" disabled={cadRunning} onClick={() => void (nanoCadMode === 'blocks' ? refreshNanoCadBlocks() : refreshNanoCadModelStudioObjects())}>Сканировать {nanoCadMode === 'blocks' ? 'блоки' : 'Model Studio'}</button>
+                  {nanoCadMode === 'blocks' && <button className="btn" disabled={cadRunning} onClick={() => void pickNanoCadSample()}>Выбрать блок-образец</button>}
+                </div>
+                <div ref={importScanResultRef} className="cad-scan-result">{renderCadProgress(cadProgressBySlot.scan, scanStatus)}{scanStatus && <div className="project-status" role="status">{scanStatus}</div>}</div>
+              </div>
+              <div className="wizard-step"><div className="wizard-step-title"><b>3</b><span>Результат скана</span></div>
+                {nanoCadMode === 'blocks' ? <div className="scan-summary-list">{nanoCadBlocks.map(block => <div key={block.name}><strong>{block.name}</strong><span>{block.count} шт. · атрибуты: {block.attributes.map(a => a.tag).join(', ') || 'нет'}</span></div>)}{!nanoCadBlocks.length && <div className="empty-message">Сканируйте чертёж или выделенные блоки.</div>}</div> :
+                  <div className="scan-summary-list">{nanoCadModelObjects.map(obj => <div key={obj.name}><strong>{modelStudioObjectLabel(obj)}</strong><span>{obj.count} шт. · координаты {obj.coordinateCount ?? 0}/{obj.count} · {obj.parameters.length} параметров</span></div>)}{!nanoCadModelObjects.length && <div className="empty-message">Сканируйте чертёж или выделенные объекты Model Studio.</div>}</div>}
+                <small>Снимок скана используется при импорте и экспорте. После изменений в DWG обновите его.</small>
+              </div>
+              <div className="dialog-actions-row"><button className="btn" disabled={cadRunning} onClick={() => { setImportSource('nanocad'); setTransferTab('import'); }}>К импорту</button><button className="btn primary" disabled={cadRunning} onClick={() => { setExportTarget('nanocad'); setTransferTab('export'); }}>К экспорту</button></div>
+            </div>
+          )}
+          {transferTab === 'import' && (
           <div className="transfer-dialog-panel import-wizard-panel">
+            <div className="transfer-scroll-content">
             <div className="wizard-step">
               <div className="wizard-step-title"><b>1</b><span>Источник</span></div>
               <div className="transfer-mode-grid">
@@ -1731,29 +1842,20 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                 </div>
                 {renderCadProgress(fileImportProgress, importStatus)}
                 {importStatus && <div className="project-status">{importStatus}</div>}
-                <div className="dialog-actions-row"><button className="btn primary" disabled={!importPreview || fileImportProgress?.status === 'running'} onClick={() => void confirmImportFromFile()}>Подтвердить импорт</button><button className="btn" onClick={() => setImportPanelOpen(false)}>Закрыть</button></div>
+                <div className="dialog-actions-row"><button className="btn primary" disabled={!importPreview || fileImportProgress?.status === 'running'} onClick={() => void confirmImportFromFile()}>Подтвердить импорт</button><button className="btn" onClick={() => setTransferPanelOpen(false)}>Закрыть</button></div>
               </>
             ) : (
               <fieldset disabled={cadRunning} className="nanocad-import-panel transfer-fieldset">
                 <div className="wizard-step">
                   <div className="wizard-step-title"><b>2</b><span>Тип объектов nanoCAD</span></div>
                   <div className="transfer-mode-grid compact">
-                    <button className={`transfer-mode-card ${nanoCadMode === 'blocks' ? 'active' : ''}`} onClick={() => setNanoCadMode('blocks')}><strong>Блоки</strong><span>Координаты вставки и номера из атрибутов блоков.</span></button>
-                    <button className={`transfer-mode-card ${nanoCadMode === 'model_studio' ? 'active' : ''}`} onClick={() => setNanoCadMode('model_studio')}><strong>Model Studio</strong><span>Сваи из модели и номера из выбранного параметра.</span></button>
+                    <button className={`transfer-mode-card ${nanoCadMode === 'blocks' ? 'active' : ''}`} onClick={() => selectCadObjectMode('blocks')}><strong>Блоки</strong><span>Координаты вставки и номера из атрибутов блоков.</span></button>
+                    <button className={`transfer-mode-card ${nanoCadMode === 'model_studio' ? 'active' : ''}`} onClick={() => selectCadObjectMode('model_studio')}><strong>Model Studio</strong><span>Сваи из модели и номера из выбранного параметра.</span></button>
                   </div>
                 </div>
                 <div className="wizard-step">
-                  <div className="wizard-step-title"><b>3</b><span>{nanoCadMode === 'blocks' ? 'Поиск блоков' : 'Поиск объектов Model Studio'}</span></div>
-                  {scanScopeView}
-                  {nanoCadMode === 'blocks' ? (
-                    <div className="dialog-actions-row left">
-                      <button className={`btn ${nanoCadBlockMode === 'scan' ? 'primary' : ''}`} data-tooltip="Читает блоки в выбранной области сканирования и определяет их типы и атрибуты." onClick={() => { setNanoCadBlockMode('scan'); void refreshNanoCadBlocks(); }}>Сканировать блоки</button>
-                      <button className={`btn ${nanoCadBlockMode === 'pick' ? 'primary' : ''}`} data-tooltip="В nanoCAD выбери один блок-образец. Приложение найдёт все блоки с таким EffectiveName." onClick={() => { setNanoCadBlockMode('pick'); void pickNanoCadSample(); }}>Выбрать образец в nanoCAD</button>
-                    </div>
-                  ) : (
-                    <div className="dialog-actions-row left"><button className="btn primary" onClick={() => void refreshNanoCadModelStudioObjects()}>Сканировать Model Studio</button></div>
-                  )}
-                  <div ref={importScanResultRef} className="cad-scan-result">{renderCadProgress(cadProgressBySlot['import-scan'], scanStatuses.import)}{scanStatuses.import && <div className="project-status" role="status">{scanStatuses.import}</div>}</div>
+                  <div className="wizard-step-title"><b>3</b><span>Снимок nanoCAD</span></div>
+                  <div className="dialog-actions-row left"><span>{scanResultLabel(nanoCadMode)}</span><button className="btn small" onClick={() => setTransferTab('scan')}>Открыть скан</button></div>
                 </div>
                 <div className="wizard-step">
                   <div className="wizard-step-title"><b>4</b><span>Параметры чтения</span></div>
@@ -1769,7 +1871,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                         <div className="dialog-actions-row left"><button className="btn small" onClick={() => setNanoCadSelectedModelObjectNames(modelStudioObjectsForList.map((obj) => obj.name))}>Выбрать всё</button><button className="btn small" onClick={() => setNanoCadSelectedModelObjectNames([])}>Снять выбор</button><small>Выбрано групп: {selectedModelStudioObjectNamesForRequest().length}</small></div>
                       </div>
                       <div className="modelstudio-object-list grouped">
-                        {modelStudioObjectsForList.map((obj) => (<div key={obj.name} className="modelstudio-object-group"><label className="modelstudio-object-item"><input type="checkbox" checked={nanoCadSelectedModelObjectNames.includes(obj.name)} onChange={(event) => toggleModelStudioObjectSelection(obj.name, event.target.checked)} /><span className="modelstudio-object-text"><strong>{modelStudioObjectLabel(obj)}</strong><small>{modelStudioObjectMeta(obj)}</small></span></label><label className="modelstudio-param-row"><span>Параметр чтения номера</span><select value={modelStudioNumberParameterForObject(obj.name)} onChange={(event) => setModelStudioNumberParameterForObject(obj.name, event.target.value)}><option value="">Не брать номер</option>{obj.parameters.map((parameter) => (<option key={parameter.name} value={parameter.name}>{parameter.name}{obj.numberParameterCandidates.includes(parameter.name) ? ' · похоже на номер' : ''}</option>))}</select></label></div>))}
+                        {modelStudioObjectsForList.map((obj) => (<div key={obj.name} className="modelstudio-object-group"><label className="modelstudio-object-item"><input type="checkbox" checked={nanoCadSelectedModelObjectNames.includes(obj.name)} onChange={(event) => toggleModelStudioObjectSelection(obj.name, event.target.checked)} /><span className="modelstudio-object-text"><strong>{modelStudioObjectLabel(obj)}</strong><small>{modelStudioObjectMeta(obj)}</small>{Boolean(obj.missingNumberParameter) && <small className="field-help warning">Параметр {obj.verifiedNumberParameter} отсутствует у {obj.missingNumberParameter} из {obj.count} объектов</small>}</span></label><label className="modelstudio-param-row"><span>Параметр чтения номера</span><select value={modelStudioNumberParameterForObject(obj.name)} onChange={(event) => setModelStudioNumberParameterForObject(obj.name, event.target.value)}><option value="">Не брать номер</option>{obj.parameters.map((parameter) => (<option key={parameter.name} value={parameter.name}>{parameter.name}{obj.numberParameterCandidates.includes(parameter.name) ? ' · похоже на номер' : ''}</option>))}</select></label></div>))}
                       </div>
                     </div>
                   ) : <div className="empty-message">Сканирование Model Studio использует Object.Element. Проверишь на рабочей модели, потому что COM-структура может отличаться.</div>)}
@@ -1778,34 +1880,25 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                   <div className="wizard-step-title"><b>5</b><span>Базовая точка и импорт</span></div>
                   <div className="base-point-card flat"><label className="cad-checkbox-line"><input type="checkbox" checked={importUseBasePoint} onChange={(event) => setImportUseBasePoint(event.target.checked)} /><span>Импортировать относительно базовой точки</span></label><div className="base-point-grid"><label><span>База X</span><input value={importBaseX} onChange={(event) => setImportBaseX(event.target.value)} disabled={!importUseBasePoint} /></label><label><span>База Y</span><input value={importBaseY} onChange={(event) => setImportBaseY(event.target.value)} disabled={!importUseBasePoint} /></label></div><small>Для nanoCAD координата проекта = InsertionPoint − базовая точка. При экспорте обратно используется InsertionPoint = точка проекта + база с допуском в единицах чертежа.</small></div>
                 </div>
-                <section className="cad-action-block" aria-label="Импорт в проект">
-                <strong>Импорт в проект</strong>
-                {renderCadProgress(cadProgressBySlot.import, nanoCadStatus)}
-                {nanoCadMode === 'model_studio' && <label className="cad-checkbox-line"><input type="checkbox" checked={preserveHandles} onChange={(e) => setPreserveHandles(e.target.checked)} /><span>Сохранить handle для ускоренного поиска при следующем экспорте</span></label>}
-                {nanoCadStatus && <div className="project-status">{nanoCadStatus}</div>}
-                <div className="dialog-actions-row"><button className="btn primary" disabled={nanoCadMode === 'blocks' ? !nanoCadSelectedBlock : false} onClick={() => void confirmNanoCadBlockImport()}>{nanoCadMode === 'blocks' ? 'Импортировать блоки' : 'Импортировать Model Studio'}</button><button className="btn" onClick={() => setImportPanelOpen(false)}>Закрыть</button></div>
-                </section>
               </fieldset>
             )}
+            </div>
+            {importSource === 'nanocad' && (
+              <section className="cad-action-block" aria-label="Импорт в проект">
+                <strong>Импорт в проект</strong>
+                {renderCadProgress(cadProgressBySlot.import, nanoCadStatus)}
+                {nanoCadMode === 'model_studio' && <label className="cad-checkbox-line"><input type="checkbox" checked={preserveHandles} disabled={cadRunning} onChange={(e) => setPreserveHandles(e.target.checked)} /><span>Сохранить handle для ускоренного поиска при следующем экспорте</span></label>}
+                <label className="cad-checkbox-line"><input type="checkbox" checked={overwriteImportedNumbers} disabled={cadRunning} onChange={(e) => setOverwriteImportedNumbers(e.target.checked)} /><span>Перезаписать номера существующих точек из модели</span></label>
+                <small>Новые точки всегда получают номер при импорте. Повторный импорт сохраняет текущие номера, пока этот переключатель выключен. После импорта он выключится снова. Пустые номера, заблокированные точки и группы не перезаписываются.</small>
+                {nanoCadStatus && <div className="project-status">{nanoCadStatus}</div>}
+                <div className="dialog-actions-row"><button className="btn primary" disabled={cadRunning || (nanoCadMode === 'blocks' && !nanoCadSelectedBlock)} onClick={() => void confirmNanoCadBlockImport()}>{nanoCadMode === 'blocks' ? 'Импортировать блоки' : 'Импортировать Model Studio'}</button><button className="btn" disabled={cadRunning} onClick={() => setTransferPanelOpen(false)}>Закрыть</button></div>
+              </section>
+            )}
           </div>
-        </DraggablePanel>
-      )}
-      {exportPanelOpen && (
-        <DraggablePanel
-          id="export-data-dialog"
-          title="Экспорт данных"
-          initialX={54}
-          initialY={toolbarHeight + 22}
-          width={660}
-          height={560}
-          minWidth={520}
-          minHeight={380}
-          dockable
-          dockOffsetTop={toolbarHeight}
-          dockOffsetBottom={28}
-          onClose={() => setExportPanelOpen(false)}
-        >
-          <fieldset disabled={cadRunning} className="transfer-dialog-panel import-wizard-panel transfer-fieldset">
+          )}
+          {transferTab === 'export' && (
+          <div className="transfer-dialog-panel import-wizard-panel transfer-fieldset">
+            <fieldset disabled={cadRunning} className="transfer-scroll-content transfer-fieldset">
             <div className="wizard-step">
               <div className="wizard-step-title"><b>1</b><span>Куда экспортируем</span></div>
               <div className="transfer-mode-grid">
@@ -1819,32 +1912,33 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
               <>
                 <div className="wizard-step">
                   <div className="wizard-step-title"><b>2</b><span>Тип объектов nanoCAD</span></div>
-                  <div className="transfer-mode-grid compact"><button className={`transfer-mode-card ${exportNanoCadMode === 'blocks' ? 'active' : ''}`} onClick={() => setExportNanoCadMode('blocks')}><strong>Блоки</strong><span>Поиск по InsertionPoint и запись в атрибут блока.</span></button><button className={`transfer-mode-card ${exportNanoCadMode === 'model_studio' ? 'active' : ''}`} onClick={() => setExportNanoCadMode('model_studio')}><strong>Model Studio</strong><span>Запись номеров по координатам или сохранённой связи с объектом.</span></button></div>
+                  <div className="transfer-mode-grid compact"><button className={`transfer-mode-card ${exportNanoCadMode === 'blocks' ? 'active' : ''}`} onClick={() => selectCadObjectMode('blocks')}><strong>Блоки</strong><span>Поиск по InsertionPoint и запись в атрибут блока.</span></button><button className={`transfer-mode-card ${exportNanoCadMode === 'model_studio' ? 'active' : ''}`} onClick={() => selectCadObjectMode('model_studio')}><strong>Model Studio</strong><span>Запись номеров по координатам или сохранённой связи с объектом.</span></button></div>
                 </div>
                 <div className="wizard-step">
                   <div className="wizard-step-title"><b>3</b><span>Что экспортировать</span></div>
-                  <div className="export-group-list">
-                    <button className="btn small" onClick={() => setExportSelectedGroupIds(project.groups.map((group) => group.id))}>Все группы</button>
-                    <button className="btn small" onClick={() => setExportSelectedGroupIds([])}>Все точки проекта</button>
-                    {project.groups.map((group: PileGroup) => (
-                      <label key={group.id} className="export-group-item"><input type="checkbox" checked={exportSelectedGroupIds.includes(group.id)} onChange={(event) => setExportSelectedGroupIds((items) => event.target.checked ? Array.from(new Set([...items, group.id])) : items.filter((id) => id !== group.id))} /><span className="group-color-dot" style={{ backgroundColor: group.color }} /><span>{group.name}</span><small>{project.points.filter((point: PilePoint) => point.groupId === group.id).length}</small></label>
-                    ))}
+                  <div className="export-group-actions">
+                    <button className={`btn small ${!exportAllPoints && exportSelectedGroupIds.length === project.groups.length && project.groups.length ? 'active' : ''}`} title="Повторное нажатие снимает выбор всех групп" onClick={() => { setExportAllPoints(false); setExportSelectedGroupIds(items => items.length === project.groups.length ? [] : project.groups.map(group => group.id)); }}>Выбрать все</button>
+                    <button className={`btn small ${exportAllPoints ? 'active' : ''}`} onClick={() => { setExportAllPoints(true); setExportSelectedGroupIds([]); }}>Все точки проекта</button>
                   </div>
-                  <small>Выбрано групп: {selectedExportGroups.length}. Точек к экспорту: {exportPoints.length}. Способ сопоставления задаётся ниже.</small>
+                  <div className="export-group-list">
+                    {project.groups.map((group: PileGroup) => (
+                      <label key={group.id} className="export-group-item"><input type="checkbox" checked={!exportAllPoints && exportSelectedGroupIds.includes(group.id)} onChange={(event) => { setExportAllPoints(false); setExportSelectedGroupIds((items) => event.target.checked ? Array.from(new Set([...items, group.id])) : items.filter((id) => id !== group.id)); }} /><span className="group-color-dot" style={{ backgroundColor: group.color }} /><span>{group.name}</span><small>{project.points.filter((point: PilePoint) => point.groupId === group.id).length}</small></label>
+                    ))}
+                    {!project.groups.length && <small>В проекте пока нет групп. Можно экспортировать все точки проекта.</small>}
+                  </div>
+                  <small>{exportAllPoints ? 'Все точки проекта' : `Выбрано групп: ${selectedExportGroups.length}`}. Точек к экспорту: {exportPoints.length}. Способ сопоставления задаётся ниже.</small>
                 </div>
                 <div className="wizard-step">
                   <div className="wizard-step-title"><b>4</b><span>Способ поиска объектов</span></div>
-                  {scanScopeView}
                   {exportNanoCadMode === 'blocks' ? (
                     <div className="nanocad-scan-actions">
-                      <button className="btn primary" data-tooltip="Сканирует ModelSpace и обновляет список типов блоков для импорта и экспорта." onClick={() => void refreshNanoCadBlocks('export')}>Сканировать блоки</button>
-                      <button className="btn" data-tooltip="Выбери один блок-образец в nanoCAD. Затем приложение найдёт все блоки с таким EffectiveName." onClick={() => void pickNanoCadSample('export')}>Выбрать образец</button>
-                      <small>Поиск заполняет типы блоков и атрибуты. Если они уже выбраны после импорта, повторять поиск не нужно.</small>
+                      <span>{scanResultLabel('blocks')}</span>
+                      <button className="btn small" onClick={() => { setNanoCadMode('blocks'); setTransferTab('scan'); }}>Открыть скан</button>
                     </div>
                   ) : (
                     <div className="nanocad-scan-actions">
-                      <button className="btn" data-tooltip="Необязательный просмотр типов и параметров Model Studio. Если имя параметра известно, можно сразу экспортировать." onClick={() => void refreshNanoCadModelStudioObjects('export')}>Найти типы и параметры</button>
-                      <small>Необязательный шаг: если параметр записи известен, укажите его ниже и сразу экспортируйте.</small>
+                      <span>{scanResultLabel('model_studio')} По сохранённым handle можно экспортировать и без снимка.</span>
+                      <button className="btn small" onClick={() => { setNanoCadMode('model_studio'); setTransferTab('scan'); }}>Открыть скан</button>
                       <label><span>Сопоставление</span><select value={exportMatchMode} onChange={(e) => setExportMatchMode(e.target.value as 'auto' | 'coordinates' | 'handles')}>
                         <option value="auto">Ускоренный поиск: handle + сканирование остальных</option>
                         <option value="coordinates">По координатам</option>
@@ -1853,7 +1947,6 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                       <small>Связей с исходным DWG: {exportPoints.filter((p) => p.meta?.cadHandle && p.meta?.cadDocument).length} из {exportPoints.length}. Handle ускоряет проверку в исходном DWG. Если связь не найдена, ускоренный режим ищет объект по координатам.</small>
                     </div>
                   )}
-                  <div ref={exportScanResultRef} className="cad-scan-result">{renderCadProgress(cadProgressBySlot['export-scan'], scanStatuses.export)}{scanStatuses.export && <div className="project-status" role="status">{scanStatuses.export}</div>}</div>
                 </div>
                 <div className="wizard-step">
                   <div className="wizard-step-title"><b>5</b><span>Настройки сопоставления</span></div>
@@ -1863,25 +1956,34 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                     <div className="modelstudio-selection-panel compact">
                       <label className="cad-checkbox-line"><input type="checkbox" checked={exportFilterObjectTypes} onChange={e => setExportFilterObjectTypes(e.target.checked)} /><span>Ограничить поиск выбранными типами объектов</span></label>
                       {exportFilterObjectTypes && <>
-                      <div className="modelstudio-display-row"><label><span>Отображение списка</span><select value={nanoCadModelNameMode} onChange={(event) => setNanoCadModelNameMode(event.target.value as 'display' | 'technical')}><option value="display">Имя</option><option value="technical">Тип элемента API</option></select></label><div className="dialog-actions-row left"><button className="btn small" onClick={() => setNanoCadSelectedModelObjectNames(modelStudioObjectsForList.map((obj) => obj.name))}>Выбрать всё</button><button className="btn small" onClick={() => setNanoCadSelectedModelObjectNames([])}>Снять выбор</button><small>Выбрано групп: {selectedModelStudioObjectNamesForRequest().length}</small></div></div>
-                      <div className="modelstudio-object-list compact grouped">{modelStudioObjectsForList.map((obj) => (<label key={obj.name} className="modelstudio-object-item"><input type="checkbox" checked={nanoCadSelectedModelObjectNames.includes(obj.name)} onChange={(event) => toggleModelStudioObjectSelection(obj.name, event.target.checked)} /><span className="modelstudio-object-text"><strong>{modelStudioObjectLabel(obj)}</strong><small>{modelStudioObjectMeta(obj)}</small></span></label>))}</div>
-                      {modelStudioObjectsForList.length === 0 && <small>Нажмите «Найти типы и параметры», чтобы заполнить список.</small>}
+                      <div className="modelstudio-display-row"><label><span>Отображение списка</span><select value={nanoCadModelNameMode} onChange={(event) => setNanoCadModelNameMode(event.target.value as 'display' | 'technical')}><option value="display">Имя</option><option value="technical">Тип элемента API</option></select></label><div className="dialog-actions-row left"><button className="btn small" onClick={() => setNanoCadSelectedModelObjectNames(exportMappableObjects.map(obj => obj.name))}>Выбрать всё</button><button className="btn small" onClick={() => setNanoCadSelectedModelObjectNames([])}>Снять выбор</button><small>Выбрано типов: {selectedModelStudioObjectNamesForRequest().filter(name => exportMappableObjects.some(obj => obj.name === name)).length}</small></div></div>
+                      <div className="modelstudio-object-list compact grouped">{exportMappableObjects.map((obj) => (<label key={obj.name} className="modelstudio-object-item"><input type="checkbox" checked={nanoCadSelectedModelObjectNames.includes(obj.name)} onChange={(event) => toggleModelStudioObjectSelection(obj.name, event.target.checked)} /><span className="modelstudio-object-text"><strong>{modelStudioObjectLabel(obj)}</strong><small>{modelStudioObjectMeta(obj)}</small></span></label>))}</div>
+                      {exportMappableObjects.length === 0 && <small>У экспортируемых точек нет типов из текущего скана.</small>}
                       </>}
-                      <label className="modelstudio-export-param"><span>Параметр записи номера</span><input value={nanoCadModelNumberParameter} onChange={(event) => setNanoCadModelNumberParameter(event.target.value)} placeholder="Например, GPP_PILE_NUMBER" /></label>
+                      <div className="modelstudio-export-mapping">
+                        <strong>Куда записывать номер</strong>
+                        <small>У {exportStoredParameterCount} из {exportPoints.length} точек параметр сохранён при импорте — он используется первым. Для остальных действует сопоставление по типу объекта из скана.</small>
+                        {exportMappableObjects.length > 0 && <div className="modelstudio-export-mapping-list">
+                          {exportMappableObjects.map(obj => <label key={obj.name}><span>{modelStudioObjectLabel(obj)} · {exportPoints.filter(point => point.meta?.objectName === obj.name).length} точек</span><select value={modelStudioNumberParameterForObject(obj.name)} onChange={event => setModelStudioNumberParameterForObject(obj.name, event.target.value)}><option value="">Не задан</option>{obj.parameters.map(parameter => <option key={parameter.name} value={parameter.name}>{parameter.name}</option>)}</select></label>)}
+                        </div>}
+                        <label className="modelstudio-export-param"><span>Запасной параметр для точек без сопоставления</span><input value={nanoCadModelNumberParameter} onChange={(event) => setNanoCadModelNumberParameter(event.target.value)} placeholder="Необязательно" /></label>
+                      </div>
                     </div>
                   )}
                   <div className="base-point-card flat"><label className="cad-checkbox-line"><input type="checkbox" checked={exportUseBasePoint} onChange={(event) => setExportUseBasePoint(event.target.checked)} /><span>Использовать базовую точку для обратного поиска</span></label><div className="base-point-grid"><label><span>База X</span><input value={exportBaseX} onChange={(event) => setExportBaseX(event.target.value)} disabled={!exportUseBasePoint} /></label><label><span>База Y</span><input value={exportBaseY} onChange={(event) => setExportBaseY(event.target.value)} disabled={!exportUseBasePoint} /></label><label><span>Допуск, ед. чертежа</span><input value={exportTolerance} onChange={(event) => setExportTolerance(event.target.value)} /></label></div><small>Для поиска в nanoCAD используется точка проекта + базовая точка. По умолчанию допуск 1 единица чертежа; задайте его с учётом масштаба DWG.</small></div>
                 </div>
               </>
             )}
+            </fieldset>
             <section className="cad-action-block" aria-label="Экспорт данных и результат">
             <strong>{exportTarget === 'nanocad' ? 'Запись номеров в nanoCAD' : 'Сохранение проекта'}</strong>
             {exportTarget === 'nanocad' ? renderCadProgress(cadProgressBySlot.export, exportStatus) : renderCadProgress(fileExportProgress, exportStatus)}
-            {exportTarget === 'nanocad' && exportNanoCadMode === 'model_studio' && <label className="cad-checkbox-line"><input type="checkbox" checked={saveDrawing} onChange={(e) => setSaveDrawing(e.target.checked)} /><span>Сохранить DWG после записи без ошибок</span></label>}
+            {exportTarget === 'nanocad' && exportNanoCadMode === 'model_studio' && <label className="cad-checkbox-line"><input type="checkbox" checked={saveDrawing} disabled={cadRunning} onChange={(e) => setSaveDrawing(e.target.checked)} /><span>Сохранить DWG после записи без ошибок</span></label>}
             {exportStatus && <div className="project-status">{exportStatus}</div>}
-            <div className="dialog-actions-row"><button className="btn primary" disabled={fileExportProgress?.status === 'running'} onClick={() => void confirmExport()}>{exportTarget === 'json' ? 'Сохранить JSON...' : 'Экспортировать в nanoCAD'}</button><button className="btn" onClick={() => setExportPanelOpen(false)}>Закрыть</button></div>
+            <div className="dialog-actions-row"><button className="btn primary" disabled={cadRunning || fileExportProgress?.status === 'running' || (exportTarget === 'nanocad' && (exportPoints.length === 0 || (exportNanoCadMode === 'blocks' ? !nanoCadSelectedBlock || !nanoCadNumberAttribute.trim() : !exportHasModelParameter)))} onClick={() => void confirmExport()}>{exportTarget === 'json' ? 'Сохранить JSON...' : 'Экспортировать в nanoCAD'}</button><button className="btn" disabled={cadRunning} onClick={() => setTransferPanelOpen(false)}>Закрыть</button></div>
             </section>
-          </fieldset>
+          </div>
+          )}
         </DraggablePanel>
       )}
 
@@ -2001,22 +2103,26 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
               <span>{project.project.name}</span>
               <small>{project.project.fileName ?? 'ещё не сохранён в projects'} · {project.points.length} точек · {project.groups.length} групп</small>
             </div>
-            <button className="btn full-width" onClick={() => void saveProjectToLocalFolder()}>Сохранить текущий проект в папку projects</button>
+            <div className="dialog-actions-row left">
+              <button className="btn" onClick={() => void saveProjectToLocalFolder()}>Сохранить текущий</button>
+              <button className="btn" onClick={() => void showProjectLocation()}>Открыть папку проектов</button>
+              {project.project.fileName && <button className="btn" onClick={() => void showProjectLocation(project.project.fileName!)}>Показать текущий файл</button>}
+            </div>
             {projectStatus && <div className="project-status">{projectStatus}</div>}
             <div className="local-project-list">
               {localProjects.length === 0 ? (
                 <div className="empty-message">Папка projects пуста или список ещё не обновлён. Нажми “Сохранить текущий проект”.</div>
               ) : localProjects.map((item) => (
-                <button
-                  key={item.fileName}
-                  className={`local-project-item ${project.project.fileName === item.fileName ? 'active' : ''}`}
-                  onClick={() => void openLocal(item.fileName)}
-                >
-                  <strong>{item.name}</strong>
-                  <span>{item.fileName}</span>
-                  <small>{item.pointsCount} точек · {item.groupsCount} групп · {formatProjectDate(item.updatedAt)}</small>
-                  {project.project.fileName === item.fileName && <em>Открыт сейчас</em>}
-                </button>
+                <div className="local-project-row" key={item.fileName}>
+                  <button className={`local-project-item ${project.project.fileName === item.fileName ? 'active' : ''}`}
+                    onClick={() => void openLocal(item.fileName)}>
+                    <strong>{item.name}</strong>
+                    <span>{item.fileName}</span>
+                    <small>{item.pointsCount} точек · {item.groupsCount} групп · {formatProjectDate(item.updatedAt)}</small>
+                    {project.project.fileName === item.fileName && <em>Открыт сейчас</em>}
+                  </button>
+                  <button className="btn small" onClick={() => void showProjectLocation(item.fileName)} title={`Показать ${item.fileName} в Проводнике`}>Расположение</button>
+                </div>
               ))}
             </div>
           </div>

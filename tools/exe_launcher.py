@@ -15,6 +15,7 @@ At runtime the launcher:
 from __future__ import annotations
 
 import ctypes
+import json
 import logging
 import os
 import socket
@@ -270,6 +271,8 @@ class DesktopApi:
         self._ready = False
         self._shown = False
         self._allow_close = False
+        # Session-only state: the next dialog starts where the user last chose a project.
+        self._project_dialog_dir = APP_DIR / "projects"
 
     def frontendReady(self) -> None:  # noqa: N802
         self._ready = True
@@ -304,6 +307,38 @@ class DesktopApi:
         threading.Thread(target=notify, daemon=True).start()
         return False
 
+    def openProjectJson(self) -> dict[str, Any]:  # noqa: N802 - pywebview JS API name
+        try:
+            import webview
+
+            if self._window is None:
+                raise RuntimeError("Окно программы ещё не готово.")
+            self._project_dialog_dir.mkdir(parents=True, exist_ok=True)
+            result = self._window.create_file_dialog(
+                webview.FileDialog.OPEN,
+                directory=str(self._project_dialog_dir),
+                file_types=("Проекты Pile Numbering (*.pilenum.json;*.json)", "JSON (*.json)", "Все файлы (*.*)"),
+            )
+            if not result:
+                return {"opened": False, "canceled": True}
+
+            raw_path = result[0] if isinstance(result, (list, tuple)) else result
+            path = Path(str(raw_path)).resolve()
+            self._project_dialog_dir = path.parent
+            if not path.is_file() or not path.name.lower().endswith(".json"):
+                raise ValueError("Выберите существующий файл проекта .pilenum.json или .json.")
+            content = path.read_text(encoding="utf-8-sig")
+            payload = json.loads(content)
+            if not isinstance(payload, dict) or not isinstance(payload.get("project"), dict):
+                raise ValueError("В выбранном JSON нет данных проекта.")
+            from app.recent_projects import remember_recent_project
+            remember_recent_project(APP_DIR / "config", path)
+            logging.info("Project selected through desktop dialog: %s", path)
+            return {"opened": True, "path": str(path), "fileName": path.name, "content": content}
+        except Exception as exc:  # noqa: BLE001 - show a useful error in the frontend
+            logging.exception("Desktop project open failed")
+            return {"opened": False, "error": str(exc)}
+
     def saveProjectJson(self, file_name: str, content: str) -> dict[str, Any]:  # noqa: N802 - pywebview JS API name
         try:
             import webview
@@ -312,14 +347,16 @@ class DesktopApi:
             if not safe_name.lower().endswith((".pilenum.json", ".json")):
                 safe_name = f"{safe_name}.pilenum.json"
 
-            window = webview.windows[0] if webview.windows else None
+            window = self._window or (webview.windows[0] if webview.windows else None)
             if window is None:
                 fallback = APP_DIR / safe_name
+                _ensure_same_project_before_replace(fallback, content)
                 _atomic_write_project(fallback, str(content))
                 return {"saved": True, "path": str(fallback)}
 
             result = window.create_file_dialog(
-                webview.SAVE_DIALOG,
+                webview.FileDialog.SAVE,
+                directory=str(self._project_dialog_dir),
                 save_filename=safe_name,
                 file_types=("Pile Numbering project (*.pilenum.json)", "JSON files (*.json)", "All files (*.*)"),
             )
@@ -327,10 +364,12 @@ class DesktopApi:
                 return {"saved": False, "canceled": True}
 
             raw_path = result[0] if isinstance(result, (list, tuple)) else result
-            path = Path(str(raw_path))
-            if not path.suffix:
-                path = path.with_suffix(".pilenum.json")
+            path = Path(str(raw_path)).resolve()
+            self._project_dialog_dir = path.parent
+            if not path.name.lower().endswith(".json"):
+                path = path.with_name(f"{path.name}.pilenum.json")
             path.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_same_project_before_replace(path, content)
             _atomic_write_project(path, str(content))
             logging.info("JSON project exported through desktop dialog: %s", path)
             return {"saved": True, "path": str(path)}
@@ -351,6 +390,19 @@ def _atomic_write_project(path: Path, content: str) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _ensure_same_project_before_replace(path: Path, content: str) -> None:
+    if not path.exists():
+        return
+    import json
+    try:
+        existing_id = str(json.loads(path.read_text(encoding="utf-8"))["project"]["id"])
+        incoming_id = str(json.loads(content)["project"]["id"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"Файл {path.name} уже существует. Не удалось проверить, что это тот же проект.") from exc
+    if existing_id != incoming_id:
+        raise ValueError(f"Файл {path.name} принадлежит другому проекту. Выберите другое имя файла.")
 
 
 def _splash_message(message: str) -> None:

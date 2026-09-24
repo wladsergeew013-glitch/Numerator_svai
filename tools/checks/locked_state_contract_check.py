@@ -252,9 +252,9 @@ def check_toolbar_and_window_contract() -> None:
     ]:
         require(toolbar, label, "frontend/src/components/Toolbar.tsx")
     for needle in [
-        "create-project-dialog", "import-data-dialog", "export-data-dialog", "model-check-dialog",
+        "create-project-dialog", "cad-transfer-dialog", "transferTab === 'scan'", "transferTab === 'import'", "transferTab === 'export'", "model-check-dialog",
         "buildCsvPreview", "buildExcelPreview", "xlsx", "buildModelCheck", "toggleEmptyPointCheck",
-        "refreshNanoCadBlocks('export')", "pickNanoCadSample('export')", "exportSelectedGroupIds",
+        "refreshNanoCadBlocks()", "pickNanoCadSample()", "exportSelectedGroupIds",
         "rename-project-dialog", "openRenameProjectDialog", "renameProjectFromDialog", "showSaveFilePicker", "saveProjectJson",
     ]:
         require(toolbar, needle, "frontend/src/components/Toolbar.tsx")

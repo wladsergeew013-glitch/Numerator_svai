@@ -179,6 +179,7 @@ export interface ViewSettings {
   numberTextBubbleEnabled: boolean;
   showPointNumbers: boolean;
   highlightUnnumbered: boolean;
+  dimOtherGroups: boolean;
   showNumberingPreview: boolean;
   showGroupFlow: boolean;
   showGroupNumbers: boolean;
@@ -265,6 +266,12 @@ export interface LocalProjectInfo {
   groupsCount: number;
 }
 
+export interface RecentProjectInfo extends LocalProjectInfo {
+  id: string;
+  path: string;
+  openedAt: string;
+}
+
 export function defaultNumberingPipeline(order = 1): NumberingPipeline {
   return {
     id: `pipeline-${crypto.randomUUID()}`,
@@ -335,6 +342,7 @@ export function createEmptyProject(): PileProject {
       numberTextBubbleEnabled: false,
       showPointNumbers: true,
       highlightUnnumbered: true,
+      dimOtherGroups: false,
       showNumberingPreview: true,
       showGroupFlow: false,
       showGroupNumbers: false,

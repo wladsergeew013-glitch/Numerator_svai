@@ -8,6 +8,7 @@ import { GroupManager } from './components/GroupManager';
 import { OperationJournal } from './components/OperationJournal';
 import { PointInfoPanel } from './components/PointInfoPanel';
 import { StatusBar } from './components/StatusBar';
+import { StartupScreen } from './components/StartupScreen';
 import { Toolbar } from './components/Toolbar';
 import { useProjectStore } from './store/useProjectStore';
 import './styles.css';
@@ -69,6 +70,7 @@ function normalizeAutosaveSettings(settings?: AutosaveSettingsPayload | null): R
 }
 
 export default function App() {
+  const [startupOpen, setStartupOpen] = useState(true);
   const {
     appendImportedPoints,
     hydrateUserConfig,
@@ -280,6 +282,8 @@ export default function App() {
       setError(e instanceof Error ? e.message : 'Ошибка импорта CSV');
     }
   }, [appendImportedPoints, canvasWidth, canvasHeight, zoomExtents]);
+
+  if (startupOpen) return <><StartupScreen onReady={() => setStartupOpen(false)} /><CloseProjectGuard /></>;
 
   return (
     <div className="app">

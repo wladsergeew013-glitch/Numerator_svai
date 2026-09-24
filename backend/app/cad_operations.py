@@ -19,6 +19,16 @@ log_event = None
 MAX_LOG_ENTRIES = 2000
 
 
+class CadCancelled(Exception):
+    pass
+
+
+def check_cancelled():
+    job = _active.get()
+    if job is not None and job['_cancel'].is_set():
+        raise CadCancelled('Операция остановлена пользователем. Уже записанные в DWG значения могли остаться в открытом чертеже.')
+
+
 def record(context, details, level=logging.INFO):
     """Keep a bounded, operation-specific copy; the full log remains on disk."""
     job = _active.get()
@@ -47,6 +57,7 @@ def progress(phase, completed=0, total=None, **counts):
     job = _active.get()
     if not job:
         return
+    check_cancelled()
     with _jobs_lock:
         job.update(phase=phase, completed=completed, total=total, **counts)
     now = time.monotonic()
@@ -79,6 +90,7 @@ def _execute(job, func, args, kwargs):
     started = time.monotonic()
     job['_started'] = started
     job.setdefault('startedAt', time.time())
+    job.setdefault('_cancel', threading.Event())
     try:
         if sys.platform == 'win32':
             import pythoncom
@@ -87,9 +99,14 @@ def _execute(job, func, args, kwargs):
         emit('cad_started', kind=job['kind'])
         progress('Подключение к nanoCAD')
         result = func(*args, **kwargs)
+        check_cancelled()
         emit('cad_completed', kind=job['kind'], elapsedSeconds=round(time.monotonic() - started, 2),
              result={k: v for k, v in result.items() if k not in ('points', 'objects', 'blocks')} if isinstance(result, dict) else {})
         return result
+    except CadCancelled:
+        emit('cad_cancelled', kind=job['kind'], elapsedSeconds=round(time.monotonic() - started, 2),
+             completed=job.get('completed'), total=job.get('total'), updated=job.get('updated'))
+        raise
     except Exception as exc:
         emit('cad_failed', kind=job['kind'], error=str(exc), elapsedSeconds=round(time.monotonic() - started, 2),
              completed=job.get('completed'), total=job.get('total'))
@@ -109,7 +126,7 @@ def start(kind, func, *args):
     if not _lock.acquire(blocking=False):
         raise HTTPException(409, 'Выполняется другая операция nanoCAD. Дождитесь завершения.')
     job = {'id': uuid4().hex, 'kind': kind, 'status': 'running', 'phase': 'Подключение к nanoCAD',
-           'completed': 0, 'total': None, 'startedAt': time.time()}
+           'completed': 0, 'total': None, 'startedAt': time.time(), '_cancel': threading.Event()}
     with _jobs_lock:
         # Keep a bounded history; never evict a running job.
         for key in list(_jobs):
@@ -124,6 +141,9 @@ def start(kind, func, *args):
             result = _execute(job, func, args, {})
             with _jobs_lock:
                 job.update(status='completed', phase='Готово', result=result)
+        except CadCancelled as exc:
+            with _jobs_lock:
+                job.update(status='cancelled', phase='Остановлено пользователем', error=str(exc))
         except HTTPException as exc:
             with _jobs_lock:
                 job.update(status='failed', error=exc.detail)
@@ -152,6 +172,30 @@ def status(job_id):
         return snapshot
 
 
+def cancel(job_id):
+    requested = False
+    kind = None
+    with _jobs_lock:
+        if job_id not in _jobs:
+            raise HTTPException(404, 'Операция не найдена.')
+        job = _jobs[job_id]
+        if job['status'] == 'running':
+            requested = True
+            kind = job['kind']
+            job['_cancel'].set()
+            job.update(cancelRequested=True, phase='Остановка запрошена…')
+            entries = job.setdefault('_logs', [])
+            if len(entries) >= MAX_LOG_ENTRIES:
+                del entries[1]
+                job['_droppedLogs'] = job.get('_droppedLogs', 0) + 1
+            entries.append({'timestamp': time.time(), 'elapsedSeconds': round(time.monotonic() - job.get('_started', time.monotonic()), 3),
+                            'event': 'cad_cancel_requested', 'level': 'INFO', 'details': '{}'})
+        result = {'id': job_id, 'status': job['status'], 'cancelRequested': job.get('cancelRequested', False)}
+    if requested and log_event:
+        log_event('cad_cancel_requested', extra={'operationId': job_id, 'kind': kind}, level=logging.INFO)
+    return result
+
+
 def logs(job_id):
     with _jobs_lock:
         if job_id not in _jobs:
@@ -166,6 +210,7 @@ def entities(model_space):
     total = int(model_space.Count)
     progress('Чтение объектов чертежа', 0, total)
     for index in range(total):
+        check_cancelled()
         try:
             entity = model_space.Item(index)
         except Exception as exc:

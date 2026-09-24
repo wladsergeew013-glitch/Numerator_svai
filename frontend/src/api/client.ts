@@ -1,7 +1,9 @@
-import { LocalProjectInfo, NumberingSettings, PileGroup, PilePoint, PileProject } from '../types/project';
+import { LocalProjectInfo, RecentProjectInfo, NumberingSettings, PileGroup, PilePoint, PileProject } from '../types/project';
 import type { ClusterOptions, ClusterPreview } from '../types/clustering';
 
-export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
+// The packaged desktop UI is served by its own backend on a free port.
+// Keep the fixed development port only for Vite; production requests are same-origin.
+export const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? 'http://localhost:8000' : '');
 
 export async function previewAutoClusters(points: PilePoint[], options: ClusterOptions, signal?: AbortSignal): Promise<ClusterPreview> {
   return request('/api/clustering/preview', {
@@ -85,6 +87,50 @@ export async function saveLocalProject(project: PileProject): Promise<{ saved: b
 
 export async function openLocalProject(fileName: string): Promise<PileProject> {
   return request<PileProject>(`/api/projects/local/${encodeURIComponent(fileName)}`);
+}
+
+export async function listRecentProjects(): Promise<RecentProjectInfo[]> {
+  const data = await request<{ projects: RecentProjectInfo[] }>('/api/projects/recent');
+  return data.projects;
+}
+
+export async function openRecentProject(id: string): Promise<PileProject> {
+  return request<PileProject>(`/api/projects/recent/${encodeURIComponent(id)}`);
+}
+
+export async function openLocalProjectLocation(fileName?: string): Promise<{ opened: boolean; path: string }> {
+  return request(`/api/projects/local/location${fileName ? `?fileName=${encodeURIComponent(fileName)}` : ''}`);
+}
+
+export async function selectNanoCadObjectByHandle(handle: string, documentPath: string, objectName?: string): Promise<{ selected: boolean; handle: string; documentName: string }> {
+  return request('/api/nanocad/modelstudio/select', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ handle, documentPath, objectName })
+  });
+}
+
+export interface NanoCadPointActionResult {
+  handle: string;
+  documentName: string;
+  objectName: string;
+  parameterName?: string;
+  rawNumber?: string;
+  number?: number | null;
+  position?: { x: number; y: number; z: number };
+}
+
+export async function actOnNanoCadPoint(params: {
+  action: 'read' | 'write' | 'position';
+  handle: string;
+  documentPath: string;
+  objectName?: string;
+  objectKind: 'model_studio' | 'block';
+  parameterName?: string;
+  value?: string;
+}): Promise<NanoCadPointActionResult> {
+  return request<NanoCadPointActionResult>('/api/nanocad/point/action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params)
+  });
 }
 export interface PanelStateConfig {
   x?: number | null;
@@ -209,6 +255,7 @@ export interface NanoCadBlockSummary {
 
 export interface NanoCadBlocksScanResponse {
   connected: boolean;
+  scanId?: string | null;
   scope?: 'selection' | 'all';
   documentName?: string | null;
   blocks: NanoCadBlockSummary[];
@@ -225,8 +272,10 @@ export interface NanoCadPickBlockResponse {
 export interface CadProgress {
   id?: string;
   kind?: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
   phase: string;
+  documentName?: string;
+  cancelRequested?: boolean;
   completed: number;
   total: number | null;
   startedAt?: number;
@@ -248,6 +297,24 @@ export interface CadOperationLog {
 export const getCadOperationLog = (id: string) => request<CadOperationLog>(`/api/nanocad/operations/${encodeURIComponent(id)}/logs`);
 
 let cadBusy = false;
+let activeCadJobId: string | null = null;
+let cadCancelRequested = false;
+
+export class CadOperationCancelled extends Error {}
+
+export async function cancelActiveNanoCadOperation(): Promise<void> {
+  if (!cadBusy) return;
+  cadCancelRequested = true;
+  if (activeCadJobId) {
+    try {
+      await request(`/api/nanocad/operations/${encodeURIComponent(activeCadJobId)}/cancel`, { method: 'POST' });
+    } catch (error) {
+      cadCancelRequested = false;
+      throw error;
+    }
+  }
+}
+
 async function cadRequest<T>(kind: string, payload: unknown = {}): Promise<T> {
   if (cadBusy) throw new Error('Дождитесь завершения текущей операции nanoCAD.');
   cadBusy = true;
@@ -262,8 +329,18 @@ async function cadRequest<T>(kind: string, payload: unknown = {}): Promise<T> {
     const job = await request<{ id: string }>('/api/nanocad/operations', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, payload })
     });
+    activeCadJobId = job.id;
     last = { ...last, id: job.id };
     publish(last);
+    if (cadCancelRequested) {
+      try {
+        await request(`/api/nanocad/operations/${encodeURIComponent(job.id)}/cancel`, { method: 'POST' });
+      } catch (error) {
+        cadCancelRequested = false;
+        clientLog.push(`${new Date().toISOString()} Не удалось запросить остановку: ${String(error)}`);
+        publish(last);
+      }
+    }
     let errors = 0;
     while (true) {
       await new Promise((resolve) => window.setTimeout(resolve, 400));
@@ -280,15 +357,18 @@ async function cadRequest<T>(kind: string, payload: unknown = {}): Promise<T> {
       }
       last = state;
       publish(state);
+      if (state.status === 'cancelled') throw new CadOperationCancelled(typeof state.error === 'string' ? state.error : 'Операция остановлена пользователем.');
       if (state.status === 'failed') throw new Error(typeof state.error === 'string' ? state.error : JSON.stringify(state.error));
       if (state.status === 'completed') return state.result as T;
     }
   } catch (error) {
     clientLog.push(`${new Date().toISOString()} ${String(error)}`);
-    publish({ ...last, status: 'failed', phase: error instanceof Error ? error.message : String(error) });
+    publish({ ...last, status: error instanceof CadOperationCancelled ? 'cancelled' : 'failed', phase: error instanceof Error ? error.message : String(error) });
     throw error;
   } finally {
     cadBusy = false;
+    activeCadJobId = null;
+    cadCancelRequested = false;
   }
 }
 
@@ -302,6 +382,7 @@ export async function pickNanoCadBlockSample(): Promise<NanoCadPickBlockResponse
 
 export async function importNanoCadBlocks(params: {
   scope?: string;
+  scanId?: string | null;
   blockName: string;
   numberAttribute?: string | null;
   baseX?: number;
@@ -313,6 +394,7 @@ export async function importNanoCadBlocks(params: {
 }
 
 export interface NanoCadBlockExportResult {
+  reusedScan?: boolean;
   updated: number;
   matched: number;
   scanned: number;
@@ -333,6 +415,7 @@ export interface NanoCadBlockExportResult {
 
 export async function exportNanoCadBlocks(params: {
   scope?: string;
+  scanId?: string | null;
   blockName: string;
   numberAttribute: string;
   points: Array<{ id?: string | null; x: number; y: number; number?: number | string | null; sourceNumber?: number | string | null; groupId?: string | null; meta?: Record<string, unknown> }>;
@@ -361,10 +444,13 @@ export interface NanoCadModelStudioObjectSummary {
   sampleInsertionPoint?: [number, number, number] | null;
   parameters: NanoCadModelStudioParameterSummary[];
   numberParameterCandidates: string[];
+  verifiedNumberParameter?: string | null;
+  missingNumberParameter?: number;
 }
 
 export interface NanoCadModelStudioScanResponse {
   connected: boolean;
+  scanId?: string | null;
   scope?: 'selection' | 'all';
   documentName?: string | null;
   objects: NanoCadModelStudioObjectSummary[];
@@ -376,6 +462,7 @@ export async function scanNanoCadModelStudioObjects(scope: string = 'auto'): Pro
 
 export async function importNanoCadModelStudioObjects(params: {
   scope?: string;
+  scanId?: string | null;
   preserveHandles?: boolean;
   objectName?: string | null;
   selectedObjectNames?: string[] | null;
@@ -384,18 +471,19 @@ export async function importNanoCadModelStudioObjects(params: {
   baseX?: number;
   baseY?: number;
   tolerance?: number;
-}): Promise<PilePoint[]> {
-  const data = await cadRequest<{ points: PilePoint[]; count: number }>('modelstudio/import', params);
-  return data.points;
+}): Promise<{ points: PilePoint[]; diagnostics?: { missingNumberParameter?: number; fullParameterReads?: number; directParameterReads?: number; reusedScan?: boolean } }> {
+  return cadRequest('modelstudio/import', params);
 }
 
 export async function exportNanoCadModelStudioObjects(params: {
   saveDrawing?: boolean;
   scope?: string;
+  scanId?: string | null;
   matchMode?: 'auto' | 'coordinates' | 'handles';
   objectName?: string | null;
   selectedObjectNames?: string[] | null;
   numberParameter: string;
+  selectedObjectParameters?: Record<string, string> | null;
   points: Array<{ id?: string | null; x: number; y: number; number?: number | string | null; sourceNumber?: number | string | null; groupId?: string | null; meta?: Record<string, unknown> }>;
   baseX?: number;
   baseY?: number;

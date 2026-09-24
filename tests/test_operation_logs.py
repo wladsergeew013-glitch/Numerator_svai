@@ -1,4 +1,6 @@
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -82,6 +84,33 @@ class OperationLogTests(unittest.TestCase):
         entry = next(e for e in cad.logs(job['id'])['entries'] if e['event'] == 'write_failed')
         self.assertIn('parameter read only', entry['details'])
         self.assertIn('ABC', entry['details'])
+
+    def test_cancel_running_job_stops_before_next_object(self):
+        entered = threading.Event()
+        resume = threading.Event()
+        processed = []
+        def operation():
+            entered.set()
+            resume.wait(2)
+            for index in range(3):
+                cad.check_cancelled()
+                processed.append(index)
+            return {'updated': len(processed)}
+        job_id = cad.start('modelstudio/export', operation)['id']
+        self.ids.append(job_id)
+        try:
+            self.assertTrue(entered.wait(2))
+            self.assertTrue(api.cancel_cad_operation(job_id)['cancelRequested'])
+        finally:
+            resume.set()
+        for _ in range(100):
+            if cad.status(job_id)['status'] != 'running':
+                break
+            time.sleep(0.01)
+        self.assertEqual(cad.status(job_id)['status'], 'cancelled')
+        self.assertEqual(processed, [])
+        self.assertIn('cad_cancel_requested', [entry['event'] for entry in cad.logs(job_id)['entries']])
+        self.assertIn('cad_cancelled', [entry['event'] for entry in cad.logs(job_id)['entries']])
 
 
 if __name__ == '__main__':

@@ -25,6 +25,20 @@ export function makeProjectFilePayload(project: PileProject): ProjectFilePayload
   return projectData;
 }
 
+export function makeProjectCopy(project: PileProject): PileProject {
+  const copy = structuredClone(project);
+  const now = new Date().toISOString();
+  copy.project = {
+    ...copy.project,
+    id: crypto.randomUUID(),
+    createdAt: now,
+    updatedAt: now,
+    fileName: null,
+    sourceFileName: null
+  };
+  return copy;
+}
+
 export function makeUiSettingsFile(project: PileProject): UiSettingsFile {
   return {
     kind: UI_SETTINGS_FILE_KIND,

@@ -1,8 +1,10 @@
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 spec = importlib.util.spec_from_file_location('desktop_launcher', Path(__file__).parents[1] / 'tools' / 'exe_launcher.py')
@@ -25,6 +27,40 @@ class Window:
 
 
 class DesktopLifecycleTest(unittest.TestCase):
+    def test_project_dialog_starts_beside_exe_and_remembers_folder_for_session(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            projects = root / 'projects'
+            projects.mkdir()
+            first = projects / 'one.pilenum.json'
+            first.write_text('{"project":{"id":"one"}}', encoding='utf-8')
+            elsewhere = root / 'elsewhere'
+            elsewhere.mkdir()
+            second = elsewhere / 'two.pilenum.json'
+            second.write_text('{"project":{"id":"two"}}', encoding='utf-8')
+            window = MagicMock()
+            window.create_file_dialog.side_effect = [(str(first),), (str(second),), None]
+            webview = SimpleNamespace(FileDialog=SimpleNamespace(OPEN=10, SAVE=20), windows=[window])
+            with patch.object(launcher, 'APP_DIR', root), patch.dict('sys.modules', {'webview': webview}):
+                api = launcher.DesktopApi()
+                api._window = window
+                self.assertEqual(api.openProjectJson()['fileName'], first.name)
+                self.assertEqual(api.openProjectJson()['content'], second.read_text(encoding='utf-8'))
+                self.assertTrue(api.openProjectJson()['canceled'])
+                calls = window.create_file_dialog.call_args_list
+                self.assertEqual(calls[0].kwargs['directory'], str(projects))
+                self.assertEqual(calls[1].kwargs['directory'], str(projects))
+                self.assertEqual(calls[2].kwargs['directory'], str(elsewhere))
+                self.assertEqual(launcher.DesktopApi()._project_dialog_dir, projects)
+
+    def test_json_export_cannot_replace_another_project(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'field.pilenum.json'
+            path.write_text(json.dumps({'project': {'id': 'original'}}), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'другому проекту'):
+                launcher._ensure_same_project_before_replace(path, json.dumps({'project': {'id': 'other'}}))
+            self.assertEqual(json.loads(path.read_text(encoding='utf-8'))['project']['id'], 'original')
+            launcher._ensure_same_project_before_replace(path, json.dumps({'project': {'id': 'original'}}))
     def test_start_does_not_wait_for_window_before_gui_loop(self):
         webview = MagicMock()
         with patch.dict('sys.modules', {'webview': webview}), \

@@ -5,7 +5,9 @@ const vm = require('node:vm');
 const root = path.resolve(__dirname, '../..');
 const ts = require(path.join(root, 'frontend/node_modules/typescript'));
 function load(relative, context) {
-  let source = fs.readFileSync(path.join(root, relative), 'utf8').replace('import.meta.env.VITE_API_BASE', "'http://test'");
+  let source = fs.readFileSync(path.join(root, relative), 'utf8')
+    .replace('import.meta.env.VITE_API_BASE', "'http://test'")
+    .replace('import.meta.env.DEV', 'true');
   const exports = {};
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports, ...context });
   return exports;

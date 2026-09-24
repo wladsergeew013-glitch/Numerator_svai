@@ -4,6 +4,7 @@ export type RibbonCommandId =
   | 'file.projects'
   | 'file.import'
   | 'file.save'
+  | 'file.saveAs'
   | 'file.export'
   | 'edit.createPoint'
   | 'edit.delete'
@@ -21,6 +22,7 @@ export type RibbonCommandId =
   | 'workspace.zoomExtents'
   | 'workspace.grid'
   | 'workspace.numbers'
+  | 'workspace.groupFocus'
   | 'workspace.emptyPoints'
   | 'workspace.settings'
   | 'history.undo'
@@ -40,6 +42,7 @@ export const RIBBON_COMMANDS: RibbonCommandDefinition[] = [
   { id: 'file.projects', section: 'Файл', label: 'Проекты', defaultIcon: '🗂' },
   { id: 'file.import', section: 'Файл', label: 'Импорт', defaultIcon: '➕' },
   { id: 'file.save', section: 'Файл', label: 'Сохранить', defaultIcon: '💽' },
+  { id: 'file.saveAs', section: 'Файл', label: 'Сохранить как', defaultIcon: 'save-as' },
   { id: 'file.export', section: 'Файл', label: 'Экспорт', defaultIcon: '📤' },
   { id: 'edit.createPoint', section: 'Редактирование', label: 'Новая точка', defaultIcon: '＋' },
   { id: 'edit.delete', section: 'Редактирование', label: 'Удалить', defaultIcon: '⌫' },
@@ -57,6 +60,7 @@ export const RIBBON_COMMANDS: RibbonCommandDefinition[] = [
   { id: 'workspace.zoomExtents', section: 'Рабочее поле', label: 'Всё поле', defaultIcon: '⛶' },
   { id: 'workspace.grid', section: 'Рабочее поле', label: 'Сетка', defaultIcon: '#' },
   { id: 'workspace.numbers', section: 'Рабочее поле', label: 'Номера', defaultIcon: '12' },
+  { id: 'workspace.groupFocus', section: 'Рабочее поле', label: 'Фокус группы', defaultIcon: 'group-focus' },
   { id: 'workspace.emptyPoints', section: 'Рабочее поле', label: 'Без номера', defaultIcon: '○!' },
   { id: 'workspace.settings', section: 'Рабочее поле', label: 'Настройки', defaultIcon: '⚙' },
   { id: 'history.undo', section: 'История', label: 'Отмена', defaultIcon: '↶' },

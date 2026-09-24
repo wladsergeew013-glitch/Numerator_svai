@@ -263,7 +263,8 @@ export function DraggablePanel({
   const effectiveDock = canUseDock ? (dock ?? internalDock) : 'floating';
   const isDocked = canUseDock && (effectiveDock === 'left' || effectiveDock === 'right');
   const dockOffset = isDocked ? getDockOffset(id, effectiveDock) : 0;
-  const dockMaxWidth = Math.max(minWidth, Math.min(MAX_DOCK_WIDTH, window.innerWidth * 0.68));
+  const viewportWidth = Math.max(280, window.innerWidth - 16);
+  const dockMaxWidth = Math.min(viewportWidth, Math.max(minWidth, Math.min(MAX_DOCK_WIDTH, window.innerWidth * 0.68)));
 
   const bringToFront = () => setPanelZIndex(nextPanelZIndex());
 
@@ -429,16 +430,16 @@ export function DraggablePanel({
         top: dockOffsetTop,
         width: clamp(panelState.width, minWidth, dockMaxWidth),
         height: `calc(100vh - ${dockOffsetTop + dockOffsetBottom}px)`,
-        minWidth,
+        minWidth: Math.min(minWidth, viewportWidth),
         minHeight,
         zIndex: panelZIndex
       }
     : {
-        left: panelState.x,
+        left: clamp(panelState.x, 6, Math.max(6, window.innerWidth - Math.min(panelState.width, viewportWidth) - 6)),
         top: panelState.y,
-        width: panelState.width,
+        width: Math.min(panelState.width, viewportWidth),
         height: panelState.height,
-        minWidth,
+        minWidth: Math.min(minWidth, viewportWidth),
         minHeight,
         zIndex: panelZIndex
       };
@@ -491,4 +492,3 @@ export function DraggablePanel({
     </>
   );
 }
-
