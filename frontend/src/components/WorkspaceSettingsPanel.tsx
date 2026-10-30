@@ -2,7 +2,7 @@ import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { DraggablePanel } from './DraggablePanel';
 import { useProjectStore } from '../store/useProjectStore';
 import { SELECTION_DRAG_MODE_DESCRIPTIONS, SELECTION_DRAG_MODE_LABELS, SelectionDragMode, WORKSPACE_BACKGROUND_COLORS } from '../types/project';
-import { createDesktopShortcut, deleteUserIcon, getUserConfig, listUserIcons, resolveApiAssetUrl, saveUserConfig, selectAutosaveFolder, uploadApplicationIcon, uploadUserIcon, type AutosaveSettingsPayload, UserIconInfo } from '../api/client';
+import { createDesktopShortcut, deleteUserIcon, getUserConfig, listUserIcons, resolveApiAssetUrl, saveUserConfig, selectAutosaveFolder, uploadApplicationIcon, uploadUserIcon, type AutosaveSettingsPayload, type NanoCadVersion, UserIconInfo } from '../api/client';
 import { RIBBON_COMMANDS, RibbonCommandId, getRibbonCommandDefaultIcon } from '../utils/commandRegistry';
 import { makeUiSettingsFile, parseUiSettingsFile } from '../utils/projectFiles';
 
@@ -10,9 +10,10 @@ interface Props {
   onClose: () => void;
   toolbarHeight: number;
   statusBarHeight: number;
+  nanoCadTabRequest?: number;
 }
 
-type SettingsTab = 'view' | 'grid' | 'numbers' | 'markers' | 'selection' | 'autosave' | 'icons';
+type SettingsTab = 'view' | 'grid' | 'numbers' | 'markers' | 'selection' | 'nanocad' | 'autosave' | 'icons';
 
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'view', label: 'Фон' },
@@ -20,6 +21,7 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'numbers', label: 'Номера' },
   { id: 'markers', label: 'Метки' },
   { id: 'selection', label: 'Выделение' },
+  { id: 'nanocad', label: 'nanoCAD' },
   { id: 'autosave', label: 'Автосохр.' },
   { id: 'icons', label: 'Иконки' }
 ];
@@ -112,14 +114,21 @@ function DebouncedColorInput({
   );
 }
 
-export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight }: Props) {
+export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight, nanoCadTabRequest = 0 }: Props) {
   const { project, setBackground, updateGridSettings, updateViewSettings, setSettingsHoverTarget } = useProjectStore();
   const [tab, setTab] = useState<SettingsTab>('numbers');
+  useEffect(() => {
+    if (nanoCadTabRequest > 0) setTab('nanocad');
+  }, [nanoCadTabRequest]);
   const [userIcons, setUserIcons] = useState<UserIconInfo[]>([]);
   const [commandIcons, setCommandIcons] = useState<Record<string, string>>({});
   const [iconStatus, setIconStatus] = useState('');
   const [autosaveSettings, setAutosaveSettings] = useState<Required<AutosaveSettingsPayload>>(() => normalizeAutosaveSettings(null));
   const [autosaveStatus, setAutosaveStatus] = useState('');
+  const [nanoCadVersion, setNanoCadVersion] = useState<NanoCadVersion>('auto');
+  const [nanoCadSettingsReady, setNanoCadSettingsReady] = useState(false);
+  const [nanoCadSaving, setNanoCadSaving] = useState(false);
+  const [nanoCadStatus, setNanoCadStatus] = useState('');
   const commandsBySection = useMemo(() => {
     const groups = new Map<string, typeof RIBBON_COMMANDS>();
     for (const command of RIBBON_COMMANDS) {
@@ -220,8 +229,14 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
         if (cancelled) return;
         setCommandIcons(config.commandIcons ?? {});
         setAutosaveSettings(normalizeAutosaveSettings(config.autosaveSettings));
+        setNanoCadVersion(config.nanoCadVersion ?? 'auto');
+        setNanoCadSettingsReady(true);
       })
-      .catch(() => setCommandIcons({}));
+      .catch(() => {
+        if (cancelled) return;
+        setCommandIcons({});
+        setNanoCadStatus('Не удалось загрузить настройки подключения. Закройте и снова откройте настройки.');
+      });
     void refreshUserIcons();
     return () => {
       cancelled = true;
@@ -270,6 +285,21 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
       setAutosaveStatus('Настройки автосохранения сохранены.');
     } catch (error) {
       setAutosaveStatus(error instanceof Error ? error.message : 'Не удалось сохранить автосохранение');
+    }
+  };
+
+  const saveNanoCadVersion = async (version: NanoCadVersion) => {
+    setNanoCadSaving(true);
+    setNanoCadStatus('Сохраняю настройки подключения...');
+    try {
+      const config = await getUserConfig();
+      const saved = await saveUserConfig({ ...config, nanoCadVersion: version });
+      setNanoCadVersion(saved.nanoCadVersion ?? 'auto');
+      setNanoCadStatus('Настройки сохранены. Выбор применяется при следующем подключении к nanoCAD.');
+    } catch (error) {
+      setNanoCadStatus(error instanceof Error ? error.message : 'Не удалось сохранить настройки подключения');
+    } finally {
+      setNanoCadSaving(false);
     }
   };
 
@@ -686,6 +716,31 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
               <DebouncedColorInput value={project.viewSettings.previewPointLabelBubbleColor} fallback="#020617" onChange={(value) => updateViewSettings({ previewPointLabelBubbleColor: value })} />
             </label>
             <div className="settings-help">Наведи курсор на настройку — соответствующий элемент подсветится на поле. Все эти параметры лежат в viewSettings проекта и в config/user_config.json.</div>
+          </div>
+        )}
+
+        {tab === 'nanocad' && (
+          <div className="settings-tab-page">
+            <div className="popover-subtitle">Подключение к nanoCAD</div>
+            <label className="settings-grid-row">
+              <span>Версия nanoCAD</span>
+              <select
+                value={nanoCadVersion}
+                disabled={!nanoCadSettingsReady || nanoCadSaving}
+                onChange={(event) => void saveNanoCadVersion(event.target.value as NanoCadVersion)}
+              >
+                <option value="auto">Автоматически</option>
+                <option value="26">nanoCAD 26</option>
+                <option value="25">nanoCAD 25</option>
+                <option value="24">nanoCAD 24</option>
+                <option value="23">nanoCAD 23</option>
+                <option value="22">nanoCAD 22</option>
+              </select>
+            </label>
+            <div className="settings-help">
+              Откройте выбранную версию nanoCAD с Model Studio и чертёж перед импортом или экспортом. Если выбранная версия недоступна, появится предупреждение. Режим «Автоматически» ищет любую запущенную версию.
+            </div>
+            {nanoCadStatus && <div className="settings-help" role="status">{nanoCadStatus}</div>}
           </div>
         )}
 

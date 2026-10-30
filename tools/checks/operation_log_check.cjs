@@ -66,6 +66,11 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
   run = await scenario([new Error('server offline')]);
   assert.equal(run.events.at(-1).status, 'failed');
   assert.match(utils.formatOperationLog(run.events.at(-1), ''), /server offline/);
+  run = await scenario([{ id: 'scan-version' }, { id: 'scan-version', status: 'failed',
+    error: { code: 'nanocad_connection_unavailable', version: '26', message: 'Не удалось подключиться к nanoCAD 26.' } }]);
+  assert.equal(run.failure.constructor.name, 'NanoCadConnectionError');
+  assert.equal(run.failure.message, 'Не удалось подключиться к nanoCAD 26.');
+  assert.equal(run.events.at(-1).canOpenNanoCadSettings, true, 'Offer settings only for a connection error');
 
   let copied = false, removed = false, restored = false;
   const fallback = load('frontend/src/utils/operationLog.ts', { ...runtime,

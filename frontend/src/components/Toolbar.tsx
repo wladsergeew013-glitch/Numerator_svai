@@ -537,6 +537,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const [activeTab, setActiveTab] = useState<RibbonTab>(loadRibbonTab);
   const [collapsedSections, setCollapsedSections] = useState<SectionId[]>(loadCollapsedSections);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [nanoCadSettingsRequest, setNanoCadSettingsRequest] = useState(0);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [aboutEmailCopied, setAboutEmailCopied] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(false);
@@ -628,7 +629,16 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     <option value="all">Весь чертёж</option>
   </select><small>Выделите объекты в nanoCAD до запуска. Область применяется и при импорте, и при экспорте.</small></label>;
   const renderCadProgress = (progress: CadProgress | undefined, summary = '') => progress && (
-    <CadOperationProgress key={progress.id ?? progress.startedAt} progress={progress} summary={summary} />
+    <>
+      <CadOperationProgress key={progress.id ?? progress.startedAt} progress={progress} summary={summary} />
+      {progress.status === 'failed' && progress.canOpenNanoCadSettings && (
+        <button className="btn small primary" onClick={() => {
+          setTransferPanelOpen(false);
+          setNanoCadSettingsRequest(value => value + 1);
+          setWorkspaceOpen(true);
+        }}>Открыть настройки nanoCAD</button>
+      )}
+    </>
   );
   const scanResultLabel = (mode: 'blocks' | 'model_studio') => {
     const scannedAt = mode === 'blocks' ? nanoCadBlockScannedAt : nanoCadModelScannedAt;
@@ -2130,6 +2140,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
       )}
       {workspaceOpen && (
         <WorkspaceSettingsPanel
+          nanoCadTabRequest={nanoCadSettingsRequest}
           toolbarHeight={toolbarHeight}
           statusBarHeight={28}
           onClose={() => setWorkspaceOpen(false)}

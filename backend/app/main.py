@@ -320,6 +320,8 @@ def get_user_config() -> UserConfig:
 def save_user_config(config: UserConfig) -> UserConfig:
     _ensure_config_dir()
     incoming = config.model_dump(mode="json", exclude_none=True)
+    if "nanoCadVersion" not in config.model_fields_set:
+        incoming.pop("nanoCadVersion", None)
     existing: dict = {}
     if USER_CONFIG_PATH.exists():
         try:
@@ -690,6 +692,11 @@ def _coerce_float_triplet(value) -> tuple[float, float, float] | None:
 
 
 # BEGIN NANOCAD ACTIVE INSTANCE FIX V71
+def _nanocad_selected_version() -> str | None:
+    version = os.environ.get("PILE_NUMBERING_NANOCAD_VERSION", "").strip() or get_user_config().nanoCadVersion
+    return None if version == "auto" else version.removesuffix(".0")
+
+
 def _nanocad_progid_candidates() -> list[str]:
     """Return nanoCAD ProgIDs in safe attach order.
 
@@ -705,9 +712,9 @@ def _nanocad_progid_candidates() -> list[str]:
     if explicit:
         result.append(explicit)
 
-    preferred_version = os.environ.get("PILE_NUMBERING_NANOCAD_VERSION", "25").strip()
+    selected_version = _nanocad_selected_version()
     versions: list[str] = []
-    for raw in (preferred_version, "25", "24", "23", "22", "26"):
+    for raw in ((selected_version,) if selected_version else ("25", "24", "23", "22", "26")):
         clean = str(raw or "").strip()
         if not clean:
             continue
@@ -728,7 +735,8 @@ def _nanocad_progid_candidates() -> list[str]:
 
     # Generic active objects are last. GetActiveObject attaches only to a running
     # object; it does not create a new nanoCAD process.
-    result.extend(["nanoCAD.Application", "nanoCADx64.Application"])
+    if not selected_version:
+        result.extend(["nanoCAD.Application", "nanoCADx64.Application"])
 
     unique: list[str] = []
     for item in result:
@@ -755,7 +763,7 @@ def _wrap_existing_com_object(win32_client, com_object):
         return com_object
 
 
-def _find_running_nanocad_from_rot(pythoncom, win32_client):
+def _find_running_nanocad_from_rot(pythoncom, win32_client, selected_version=None):
     """Best-effort scan of Windows Running Object Table.
 
     This is a fallback for cases where versioned GetActiveObject ProgIDs are not
@@ -797,6 +805,10 @@ def _find_running_nanocad_from_rot(pythoncom, win32_client):
 
             for candidate in candidates:
                 try:
+                    if selected_version:
+                        version = re.search(r"\d+", str(getattr(candidate, "Version", "")))
+                        if version is None or version.group() != selected_version:
+                            continue
                     return _try_nanocad_application(candidate), None
                 except Exception as exc:
                     last_error = exc
@@ -825,6 +837,7 @@ def _connect_nanocad():
         ) from exc
 
     last_error: Exception | None = None
+    selected_version = _nanocad_selected_version()
 
     for progid in _nanocad_progid_candidates():
         try:
@@ -833,20 +846,23 @@ def _connect_nanocad():
         except Exception as exc:
             last_error = exc
 
-    rot_result, rot_error = _find_running_nanocad_from_rot(pythoncom, win32com.client)
+    rot_result, rot_error = _find_running_nanocad_from_rot(pythoncom, win32com.client, selected_version)
     if rot_result is not None:
         return rot_result
     if rot_error is not None:
         last_error = rot_error
 
-    raise HTTPException(
-        status_code=503,
-        detail=(
-            "Could not connect to an already running nanoCAD instance. "
-            "Open the required nanoCAD version with an active document first. "
-            f"Last error: {last_error}"
+    target = f"nanoCAD {selected_version}" if selected_version else "nanoCAD"
+    raise HTTPException(status_code=503, detail={
+        "code": "nanocad_connection_unavailable",
+        "message": (
+            f"Не удалось подключиться к {target}. Возможно, приложение не запущено "
+            "или в нём нет открытого чертежа. Откройте нужную версию nanoCAD "
+            "и чертёж либо проверьте выбранную версию в настройках nanoCAD."
         ),
-    )
+        "version": selected_version or "auto",
+        "lastError": str(last_error),
+    })
 # END NANOCAD ACTIVE INSTANCE FIX V71
 
 

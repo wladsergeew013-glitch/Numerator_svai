@@ -38,11 +38,23 @@ function formatApiError(status: number, text: string): string {
   return text || `HTTP ${status}`;
 }
 
+export class NanoCadConnectionError extends Error {}
+
+function apiError(status: number, text: string): Error {
+  const message = formatApiError(status, text);
+  try {
+    if (JSON.parse(text)?.detail?.code === 'nanocad_connection_unavailable') {
+      return new NanoCadConnectionError(message);
+    }
+  } catch { /* Plain text API error. */ }
+  return new Error(message);
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${url}`, init);
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(formatApiError(response.status, text));
+    throw apiError(response.status, text);
   }
   return response.json() as Promise<T>;
 }
@@ -146,7 +158,10 @@ export interface AutosaveSettingsPayload {
   folderPath?: string | null;
 }
 
+export type NanoCadVersion = 'auto' | '26' | '25' | '24' | '23' | '22';
+
 export interface UserConfigPayload {
+  nanoCadVersion?: NanoCadVersion;
   projectName?: string | null;
   gridSettings?: Record<string, unknown>;
   viewSettings?: Record<string, unknown>;
@@ -276,6 +291,7 @@ export interface CadProgress {
   phase: string;
   documentName?: string;
   cancelRequested?: boolean;
+  canOpenNanoCadSettings?: boolean;
   completed: number;
   total: number | null;
   startedAt?: number;
@@ -358,12 +374,12 @@ async function cadRequest<T>(kind: string, payload: unknown = {}): Promise<T> {
       last = state;
       publish(state);
       if (state.status === 'cancelled') throw new CadOperationCancelled(typeof state.error === 'string' ? state.error : 'Операция остановлена пользователем.');
-      if (state.status === 'failed') throw new Error(typeof state.error === 'string' ? state.error : JSON.stringify(state.error));
+      if (state.status === 'failed') throw apiError(503, JSON.stringify({ detail: state.error }));
       if (state.status === 'completed') return state.result as T;
     }
   } catch (error) {
     clientLog.push(`${new Date().toISOString()} ${String(error)}`);
-    publish({ ...last, status: error instanceof CadOperationCancelled ? 'cancelled' : 'failed', phase: error instanceof Error ? error.message : String(error) });
+    publish({ ...last, status: error instanceof CadOperationCancelled ? 'cancelled' : 'failed', phase: error instanceof Error ? error.message : String(error), canOpenNanoCadSettings: error instanceof NanoCadConnectionError });
     throw error;
   } finally {
     cadBusy = false;

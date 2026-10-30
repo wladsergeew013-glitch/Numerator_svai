@@ -306,6 +306,7 @@ class AutosaveSettingsConfig(BaseModel):
 
 class UserConfig(BaseModel):
     """Persistent UI config stored on disk next to EXE or in project config folder."""
+    nanoCadVersion: Literal["auto", "26", "25", "24", "23", "22"] = "auto"
     projectName: str | None = None
     gridSettings: dict[str, Any] = Field(default_factory=dict)
     viewSettings: dict[str, Any] = Field(default_factory=dict)
