@@ -1,0 +1,14 @@
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{74EBD317-3707-4B1D-9569-29381F0FB026}</ProjectGuid><Keyword>Win32Proj</Keyword><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>DynamicLibrary</ConfigurationType><PlatformToolset>v143</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries><CharacterSet>Unicode</CharacterSet></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><TargetName>PileNumbering.Sdk26</TargetName><TargetExt>.nrx</TargetExt><OutDir>$(ProjectDir)bin\nanoCAD26\</OutDir><IntDir>$(ProjectDir)obj\nanoCAD26\</IntDir></PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><PrecompiledHeader>NotUsing</PrecompiledHeader><LanguageStandard>stdcpp17</LanguageStandard><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary><WarningLevel>Level4</WarningLevel><AdditionalOptions>/source-charset:.1251 /execution-charset:utf-8 /wd4918 %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>_AFXDLL;_MCS_CORE_ONLY;NCAD;HOST_NO_MFC;WIN32;_WIN64;NDEBUG;UNICODE;_UNICODE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(AtlmfcDir)\include;$(NanoCadSDK)\include\arxgate;$(NanoCadSDK)\include;$(NanoCadSDK)\include-x64;$(NanoCadSDK)\include\MAPI;$(NanoCadSDK)\include\nrxgate;$(NanoCadSDK)\include\nrxdbgate;$(NanoCadSDK)\include\nrxhostgate;$(NanoCadSDK)\include\nrxuigate;$(ModelStudioSDK)\API\ModelStudioAPI;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+    <Link><AdditionalLibraryDirectories>$(AtlmfcDir)\lib\x64;$(NanoCadSDK)\lib-x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>nrxdbgate.lib;nrxhostgate.lib;nrxuigate.lib;McGeL.lib;oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>true</GenerateDebugInformation><TargetMachine>MachineX64</TargetMachine></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="SdkBridge.cpp" /></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

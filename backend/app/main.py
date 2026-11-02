@@ -219,9 +219,11 @@ def _safe_file_name(value: str) -> str:
     return name
 
 
-def _safe_project_path(file_name: str) -> Path:
+def _safe_project_path(file_name: str, *, existing: bool = False) -> Path:
     _ensure_projects_dir()
-    safe_name = _safe_file_name(Path(file_name).name)
+    if not file_name or Path(file_name).name != file_name or any(char in file_name for char in ('/', '\\', ':')):
+        raise HTTPException(status_code=400, detail="Invalid project file name")
+    safe_name = file_name if existing else _safe_file_name(file_name)
     path = (PROJECTS_DIR / safe_name).resolve()
     root = PROJECTS_DIR.resolve()
     if root not in path.parents and path != root:
@@ -252,7 +254,7 @@ def _autosave_file_name(project: PileProject) -> str:
 
 def _project_summary(path: Path) -> LocalProjectInfo:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
         info = payload.get("project", {}) if isinstance(payload, dict) else {}
         points = payload.get("points", []) if isinstance(payload, dict) else []
         groups = payload.get("groups", []) if isinstance(payload, dict) else []
@@ -441,7 +443,7 @@ def save_local_project(project: PileProject) -> LocalProjectSaveResponse:
 @app.get('/api/projects/local/location')
 def open_local_project_location(fileName: str | None = None) -> dict:
     _ensure_projects_dir()
-    target = _safe_project_path(fileName) if fileName else PROJECTS_DIR.resolve()
+    target = _safe_project_path(fileName, existing=True) if fileName else PROJECTS_DIR.resolve()
     if fileName and not target.is_file():
         raise HTTPException(404, 'Файл проекта не найден в папке projects.')
     if os.name != 'nt':
@@ -458,11 +460,11 @@ def open_local_project_location(fileName: str | None = None) -> dict:
 
 @app.get("/api/projects/local/{file_name}", response_model=PileProject)
 def open_local_project(file_name: str) -> PileProject:
-    path = _safe_project_path(file_name)
+    path = _safe_project_path(file_name, existing=True)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Project file not found")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
         project = PileProject.model_validate(payload)
         project.project.fileName = path.name
         project.project.sourceFileName = project.project.sourceFileName or path.name
@@ -658,6 +660,9 @@ cad.log_event = _log_backend_error
 
 
 def _raise_if_cad_disconnected(exc):
+    from app.sdk_bridge import SdkBridgeError
+    if isinstance(exc, SdkBridgeError):
+        raise HTTPException(503, str(exc)) from exc
     if getattr(exc, 'hresult', None) in (-2147023174, -2147023170, -2147417848):
         raise exc
 
@@ -745,10 +750,22 @@ def _nanocad_progid_candidates() -> list[str]:
     return unique
 
 
-def _try_nanocad_application(app_obj):
+def _nanocad_major_version(value: str) -> str | None:
+    match = re.search(r'(?<!\d)(\d{2})\.\d+', value) or re.search(r'\d+', value)
+    return (match.group(1) if match.lastindex else match.group()) if match else None
+
+
+def _try_nanocad_application(app_obj, version_hint: str | None = None):
     doc = getattr(app_obj, "ActiveDocument", None)
     if not doc:
         raise RuntimeError("nanoCAD has no active document")
+    version = str(getattr(app_obj, 'Version', '') or '')
+    major = _nanocad_major_version(version) or version_hint or _nanocad_selected_version()
+    if major == '26':
+        from app.sdk_bridge import SdkDocument
+        document_label = str(getattr(doc, 'FullName', '') or getattr(doc, 'Name', ''))
+        doc = SdkDocument(doc)
+        cad.emit('cad_sdk_transport', version=version or '26', transport='NRX', document=document_label)
     model_space = getattr(doc, "ModelSpace", None)
     if model_space is None:
         raise RuntimeError("nanoCAD active document has no ModelSpace")
@@ -806,8 +823,8 @@ def _find_running_nanocad_from_rot(pythoncom, win32_client, selected_version=Non
             for candidate in candidates:
                 try:
                     if selected_version:
-                        version = re.search(r"\d+", str(getattr(candidate, "Version", "")))
-                        if version is None or version.group() != selected_version:
+                        version = _nanocad_major_version(str(getattr(candidate, "Version", "")))
+                        if version != selected_version:
                             continue
                     return _try_nanocad_application(candidate), None
                 except Exception as exc:
@@ -842,7 +859,8 @@ def _connect_nanocad():
     for progid in _nanocad_progid_candidates():
         try:
             app_obj = win32com.client.GetActiveObject(progid)
-            return _try_nanocad_application(app_obj)
+            version_hint = re.search(r'Application\.(\d+)', progid, re.I)
+            return _try_nanocad_application(app_obj, version_hint.group(1) if version_hint else None)
         except Exception as exc:
             last_error = exc
 
@@ -1627,8 +1645,7 @@ def _suggest_modelstudio_number_parameter(parameters: dict[str, str]) -> str:
 
 
 def _modelstudio_scan_document_key(doc) -> str:
-    # FullName distinguishes drawings with identical short names. Unsaved drawings
-    # cannot be safely reused across requests.
+    # SDK documents expose unsaved:<GUID>; saved drawings retain their full path.
     return str(getattr(doc, 'FullName', '') or '').strip().replace('\\', '/').casefold()
 
 

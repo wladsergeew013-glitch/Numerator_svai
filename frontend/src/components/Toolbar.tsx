@@ -8,6 +8,7 @@ import { LocalProjectInfo, PileGroup, PilePoint, PileProject } from '../types/pr
 import { DraggablePanel } from './DraggablePanel';
 import { WorkspaceSettingsPanel } from './WorkspaceSettingsPanel';
 import { makeProjectCopy } from '../utils/projectFiles';
+import { blockScanSelection, cadScanReady, modelStudioScanSelection, type CadScanScope } from '../utils/cadScanState';
 
 interface Props {
   onCsvImport: (file: File) => void;
@@ -564,11 +565,13 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const [nanoCadBlocks, setNanoCadBlocks] = useState<NanoCadBlockSummary[]>([]);
   const [nanoCadBlockScanId, setNanoCadBlockScanId] = useState<string | null>(null);
   const [nanoCadBlockScannedAt, setNanoCadBlockScannedAt] = useState<number | null>(null);
+  const [nanoCadBlockScanScope, setNanoCadBlockScanScope] = useState<CadScanScope | null>(null);
   const [nanoCadSelectedBlock, setNanoCadSelectedBlock] = useState('');
   const [nanoCadNumberAttribute, setNanoCadNumberAttribute] = useState('');
   const [nanoCadModelObjects, setNanoCadModelObjects] = useState<NanoCadModelStudioObjectSummary[]>([]);
   const [nanoCadModelScanId, setNanoCadModelScanId] = useState<string | null>(null);
   const [nanoCadModelScannedAt, setNanoCadModelScannedAt] = useState<number | null>(null);
+  const [nanoCadModelScanScope, setNanoCadModelScanScope] = useState<CadScanScope | null>(null);
   const [nanoCadSelectedModelObject, setNanoCadSelectedModelObject] = useState('');
   const [nanoCadModelNumberParameter, setNanoCadModelNumberParameter] = useState('');
   const [nanoCadModelObjectFilter, setNanoCadModelObjectFilter] = useState('GPP_PILE_NUMBER');
@@ -607,6 +610,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     setCadProgressBySlot(current => { const next = {...current}; delete next.scan; return next; });
   };
   const [scanScope, setScanScope] = useState<'auto' | 'selection' | 'all'>('auto');
+  const scanGeneration = useRef(0);
   const [saveDrawing, setSaveDrawing] = useState(false);
   const [preserveHandles, setPreserveHandles] = useState(true);
   const [overwriteImportedNumbers, setOverwriteImportedNumbers] = useState(false);
@@ -623,7 +627,24 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     window.addEventListener('cad-progress', listener);
     return () => window.removeEventListener('cad-progress', listener);
   }, []);
-  const scanScopeView = <label className="cad-scope"><span>Область сканирования и обмена</span><select value={scanScope} disabled={cadRunning} onChange={(e) => { setScanScope(e.target.value as 'auto' | 'selection' | 'all'); setNanoCadModelScanId(null); setNanoCadBlockScanId(null); setNanoCadModelScannedAt(null); setNanoCadBlockScannedAt(null); setNanoCadBlocks([]); setNanoCadModelObjects([]); setScanStatus('Область изменена. Запустите скан снова.'); }}>
+  const scanReady = () => cadProgressBySlot.scan?.status !== 'failed' && (nanoCadMode === 'blocks'
+    ? cadScanReady(nanoCadBlockScanId, nanoCadBlockScannedAt, nanoCadBlockScanScope, scanScope, nanoCadBlocks.length)
+    : cadScanReady(nanoCadModelScanId, nanoCadModelScannedAt, nanoCadModelScanScope, scanScope, nanoCadModelObjects.length));
+  const changeScanScope = (scope: CadScanScope) => {
+    if (scope === scanScope) return;
+    scanGeneration.current += 1;
+    setScanScope(scope);
+    setNanoCadModelScanId(null); setNanoCadBlockScanId(null);
+    setNanoCadModelScannedAt(null); setNanoCadBlockScannedAt(null);
+    setNanoCadModelScanScope(null); setNanoCadBlockScanScope(null);
+    setNanoCadBlocks([]); setNanoCadModelObjects([]);
+    setNanoCadSelectedBlock(''); setNanoCadNumberAttribute('');
+    setNanoCadSelectedModelObject(''); setNanoCadSelectedModelObjectNames([]);
+    setNanoCadModelNumberParameter(''); setNanoCadModelNumberParameterByObject({});
+    setNanoCadStatus(''); setCadProgressBySlot({});
+    setScanStatus('Область изменена. Выполните новый скан, затем перейдите к импорту.');
+  };
+  const scanScopeView = <label className="cad-scope"><span>Область сканирования и обмена</span><select value={scanScope} disabled={cadRunning} onChange={(e) => changeScanScope(e.target.value as CadScanScope)}>
     <option value="auto">Выделенные объекты; если выделения нет — весь чертёж</option>
     <option value="selection">Только выделенные в nanoCAD</option>
     <option value="all">Весь чертёж</option>
@@ -904,8 +925,8 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
 
   const openImportDialog = () => {
     setTransferPanelOpen(true);
-    setTransferTab('import');
-    setImportSource('file');
+    setTransferTab(scanReady() ? 'import' : 'scan');
+    setImportSource('nanocad');
     setImportStatus('');
     setOverwriteImportedNumbers(false);
   };
@@ -997,20 +1018,18 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
 
   const refreshNanoCadBlocks = async () => {
     beginCad('scan');
-    setNanoCadBlockScanId(null);
-    setNanoCadBlockScannedAt(null);
-    setNanoCadBlocks([]);
+    const generation = scanGeneration.current;
     try {
       setNanoCadTransferStatus('Подключаюсь к nanoCAD и читаю блоки...');
       const data = await scanNanoCadBlocks(scanScope);
+      if (generation !== scanGeneration.current) return;
       setNanoCadBlockScanId(data.scanId ?? null);
       setNanoCadBlockScannedAt(Date.now());
+      setNanoCadBlockScanScope(scanScope);
       setNanoCadBlocks(data.blocks);
-      const first = data.blocks[0];
-      if (first) {
-        setNanoCadSelectedBlock((current) => current || first.name);
-        setNanoCadNumberAttribute((current) => current || first.numberAttributeCandidates[0] || first.attributes[0]?.tag || '');
-      }
+      const selected = blockScanSelection(data.blocks, nanoCadSelectedBlock, nanoCadNumberAttribute);
+      setNanoCadSelectedBlock(selected.name);
+      setNanoCadNumberAttribute(selected.attribute);
       setNanoCadTransferStatus(`Скан блоков готов (${data.scope === 'selection' ? 'выделение' : 'весь чертёж'}): найдено типов ${data.blocks.length}${data.documentName ? ` · ${data.documentName}` : ''}`);
     } catch (e) {
       setNanoCadTransferStatus(e instanceof Error ? e.message : 'Не удалось прочитать блоки nanoCAD.');
@@ -1084,28 +1103,20 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
 
   const refreshNanoCadModelStudioObjects = async () => {
     beginCad('scan');
-    setNanoCadModelScanId(null);
-    setNanoCadModelScannedAt(null);
-    setNanoCadModelObjects([]);
+    const generation = scanGeneration.current;
     try {
       setNanoCadTransferStatus('Подключаюсь к nanoCAD и читаю объекты Model Studio...');
       const data = await scanNanoCadModelStudioObjects(scanScope);
+      if (generation !== scanGeneration.current) return;
       setNanoCadModelScanId(data.scanId ?? null);
       setNanoCadModelScannedAt(Date.now());
+      setNanoCadModelScanScope(scanScope);
       setNanoCadModelObjects(data.objects);
-      const defaultParams = Object.fromEntries(data.objects.map((obj) => [obj.name, defaultModelStudioParameter(obj)]));
-      setNanoCadModelNumberParameterByObject(defaultParams);
-      const selectedByDefault = data.objects.filter((obj) => (obj.coordinateCount ?? obj.count) > 0).map((obj) => obj.name);
-      const first = data.objects[0];
-      if (first) {
-        setNanoCadSelectedModelObject(first.name);
-        setNanoCadSelectedModelObjectNames(selectedByDefault.length ? selectedByDefault : [first.name]);
-        setNanoCadModelNumberParameter('');
-      } else {
-        setNanoCadSelectedModelObject('');
-        setNanoCadSelectedModelObjectNames([]);
-        setNanoCadModelNumberParameter('');
-      }
+      const selected = modelStudioScanSelection(data.objects, nanoCadSelectedModelObjectNames, nanoCadModelNumberParameterByObject);
+      setNanoCadModelNumberParameterByObject(selected.parameters);
+      setNanoCadSelectedModelObject(selected.primary);
+      setNanoCadSelectedModelObjectNames(selected.names);
+      setNanoCadModelNumberParameter('');
       const withCoords = data.objects.reduce((sum, obj) => sum + (obj.coordinateCount ?? 0), 0);
       const total = data.objects.reduce((sum, obj) => sum + obj.count, 0);
       const missingParameters = data.objects.reduce((sum, obj) => sum + (obj.missingNumberParameter ?? 0), 0);
@@ -1146,6 +1157,11 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   };
 
   const confirmNanoCadBlockImport = async () => {
+    if (!scanReady()) {
+      setTransferTab('scan');
+      setScanStatus('Для выбранной области нужен актуальный скан. Выполните его перед импортом.');
+      return;
+    }
     beginCad('import');
     const baseX = importUseBasePoint ? parseImportNumber(importBaseX) : 0;
     const baseY = importUseBasePoint ? parseImportNumber(importBaseY) : 0;
@@ -1778,7 +1794,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
         >
           <nav className="transfer-tabbar" aria-label="Разделы обмена данными">
             <button className={transferTab === 'scan' ? 'active' : ''} onClick={() => setTransferTab('scan')}>Скан</button>
-            <button className={transferTab === 'import' ? 'active' : ''} onClick={() => setTransferTab('import')}>Импорт</button>
+            <button className={transferTab === 'import' ? 'active' : ''} onClick={() => { if (scanReady()) setImportSource('nanocad'); setTransferTab('import'); }}>Импорт</button>
             <button className={transferTab === 'export' ? 'active' : ''} onClick={() => setTransferTab('export')}>Экспорт</button>
           </nav>
           {transferTab === 'scan' && (
@@ -1802,7 +1818,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                   <div className="scan-summary-list">{nanoCadModelObjects.map(obj => <div key={obj.name}><strong>{modelStudioObjectLabel(obj)}</strong><span>{obj.count} шт. · координаты {obj.coordinateCount ?? 0}/{obj.count} · {obj.parameters.length} параметров</span></div>)}{!nanoCadModelObjects.length && <div className="empty-message">Сканируйте чертёж или выделенные объекты Model Studio.</div>}</div>}
                 <small>Снимок скана используется при импорте и экспорте. После изменений в DWG обновите его.</small>
               </div>
-              <div className="dialog-actions-row"><button className="btn" disabled={cadRunning} onClick={() => { setImportSource('nanocad'); setTransferTab('import'); }}>К импорту</button><button className="btn primary" disabled={cadRunning} onClick={() => { setExportTarget('nanocad'); setTransferTab('export'); }}>К экспорту</button></div>
+              <div className="dialog-actions-row"><button className="btn" disabled={cadRunning || !scanReady()} onClick={() => { setImportSource('nanocad'); setTransferTab('import'); }}>К импорту</button><button className="btn primary" disabled={cadRunning} onClick={() => { setExportTarget('nanocad'); setTransferTab('export'); }}>К экспорту</button></div>
             </div>
           )}
           {transferTab === 'import' && (
@@ -1817,7 +1833,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                 </button>
                 <button className={`transfer-mode-card ${importSource === 'nanocad' ? 'active' : ''}`} onClick={() => setImportSource('nanocad')}>
                   <strong>nanoCAD</strong>
-                  <span>Чтение блоков или объектов Model Studio через COM.</span>
+                  <span>Чтение блоков или объектов Model Studio из открытого nanoCAD.</span>
                 </button>
               </div>
             </div>
@@ -1884,7 +1900,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                         {modelStudioObjectsForList.map((obj) => (<div key={obj.name} className="modelstudio-object-group"><label className="modelstudio-object-item"><input type="checkbox" checked={nanoCadSelectedModelObjectNames.includes(obj.name)} onChange={(event) => toggleModelStudioObjectSelection(obj.name, event.target.checked)} /><span className="modelstudio-object-text"><strong>{modelStudioObjectLabel(obj)}</strong><small>{modelStudioObjectMeta(obj)}</small>{Boolean(obj.missingNumberParameter) && <small className="field-help warning">Параметр {obj.verifiedNumberParameter} отсутствует у {obj.missingNumberParameter} из {obj.count} объектов</small>}</span></label><label className="modelstudio-param-row"><span>Параметр чтения номера</span><select value={modelStudioNumberParameterForObject(obj.name)} onChange={(event) => setModelStudioNumberParameterForObject(obj.name, event.target.value)}><option value="">Не брать номер</option>{obj.parameters.map((parameter) => (<option key={parameter.name} value={parameter.name}>{parameter.name}{obj.numberParameterCandidates.includes(parameter.name) ? ' · похоже на номер' : ''}</option>))}</select></label></div>))}
                       </div>
                     </div>
-                  ) : <div className="empty-message">Сканирование Model Studio использует Object.Element. Проверишь на рабочей модели, потому что COM-структура может отличаться.</div>)}
+                  ) : <div className="empty-message">Сначала выполните сканирование Model Studio для выбранной области.</div>)}
                 </div>
                 <div className="wizard-step">
                   <div className="wizard-step-title"><b>5</b><span>Базовая точка и импорт</span></div>

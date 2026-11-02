@@ -10,9 +10,12 @@
 - `06_build_exe.bat` — собрать desktop EXE через PyInstaller + pywebview.
 - `07_check_locked_state.bat` — полная контрактная проверка зафиксированного состояния.
 - `08_create_desktop_shortcut.bat` — создать красивый ярлык на рабочем столе для `dist\PileNumbering.exe`.
+- `09_build_sdk_bridge.ps1` — собрать NRX-модуль nanoCAD 26; параметры `NanoCadSDK`, `ModelStudioSDK` и необязательный `AtlmfcDir` задают пути установленных SDK и MFC.
 - `90_cleanup_legacy_tools.bat` — один раз перенести старые неупорядоченные батники/мусорные файлы в `tools/legacy_*`.
 
 Проверки лежат в `tools/checks`. Служебные логи и дампы — только в `tools/out`.
+
+`node tools/checks/build_native_panels_check.mjs` и затем `backend/.venv/Scripts/python.exe tools/checks/native_panels_runtime.py` проверяют перенос панелей в настоящие окна WebView2 на Windows, ввод, общий Undo и закрытие. Используются отдельные тестовые данные; результат сохраняется в `tools/out/native-panels-runtime-data/result.json`.
 
 ## EXE launcher
 

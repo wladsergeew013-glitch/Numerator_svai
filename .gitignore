@@ -16,6 +16,8 @@ frontend/.vite/
 # Build outputs
 dist/
 build/
+cad_bridge/bin/
+cad_bridge/obj/
 *.spec
 !tools/PileNumbering.spec
 
@@ -27,6 +29,7 @@ tests/out/
 
 # Local/runtime data
 config/user_config.json
+config/detached_windows.json
 projects/*.autosave_*.pilenum.json
 autosaves/
 data/images/

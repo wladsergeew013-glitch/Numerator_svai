@@ -1,6 +1,9 @@
-import { CSSProperties, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { CSSProperties, ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { getUserConfig, saveUserConfig } from '../api/client';
 import { GroupManagerDock } from '../types/project';
+import { beginNativePanelMove, detachPanelWindow, disposePanelWindow, nativePanelsAvailable, returnPanelWindow } from '../utils/nativePanelWindows';
+import { activatePanelRoot, registerPanelRoot } from './PanelOverlay';
 
 interface Props {
   id: string;
@@ -226,6 +229,26 @@ export function DraggablePanel({
   const [panelZIndex, setPanelZIndex] = useState(nextPanelZIndex);
   const [dockPreview, setDockPreview] = useState<DockSide | null>(null);
   const [dockVersion, setDockVersion] = useState(0);
+  const [nativeReady, setNativeReady] = useState(nativePanelsAvailable);
+  const [detached, setDetached] = useState(false);
+  const detachedRef = useRef(false);
+  const detachPending = useRef(false);
+  const inlineMount = useRef<HTMLDivElement>(null);
+  const [portalMount] = useState(() => {
+    const element = document.createElement('div');
+    element.className = 'panel-portal-mount';
+    return element;
+  });
+  useLayoutEffect(() => {
+    inlineMount.current?.appendChild(portalMount);
+    const unregister = registerPanelRoot(id, portalMount);
+    return () => { unregister(); disposePanelWindow(id); portalMount.remove(); };
+  }, [id, portalMount]);
+  useEffect(() => {
+    const available = () => setNativeReady(nativePanelsAvailable());
+    window.addEventListener('pile-native-panels-ready', available);
+    return () => window.removeEventListener('pile-native-panels-ready', available);
+  }, []);
   const dragRef = useRef<{ startX: number; startY: number; panelX: number; panelY: number } | null>(null);
   const resizeRef = useRef<{
     mode: ResizeMode;
@@ -261,7 +284,7 @@ export function DraggablePanel({
   }, [allowSavedDock, canUseDock, dock, id]);
 
   const effectiveDock = canUseDock ? (dock ?? internalDock) : 'floating';
-  const isDocked = canUseDock && (effectiveDock === 'left' || effectiveDock === 'right');
+  const isDocked = !detached && canUseDock && (effectiveDock === 'left' || effectiveDock === 'right');
   const dockOffset = isDocked ? getDockOffset(id, effectiveDock) : 0;
   const viewportWidth = Math.max(280, window.innerWidth - 16);
   const dockMaxWidth = Math.min(viewportWidth, Math.max(minWidth, Math.min(MAX_DOCK_WIDTH, window.innerWidth * 0.68)));
@@ -289,14 +312,51 @@ export function DraggablePanel({
     setDockVersion((value) => value + 1);
   };
 
+  const detach = (drag: boolean) => {
+    if (!inlineMount.current || detachedRef.current || detachPending.current) return;
+    detachPending.current = true;
+    const started = detachPanelWindow({
+      id, title, mount: portalMount, placeholder: inlineMount.current,
+      width: panelState.width, height: isDocked ? Math.min(760, window.innerHeight - 80) : panelState.height,
+      drag, onClose,
+      onReady: () => {
+        detachedRef.current = true; detachPending.current = false;
+        dragRef.current = null; resizeRef.current = null; setDockPreview(null);
+        setDetached(true); removeFromRegistry(id);
+      },
+      onReturn: drop => {
+        detachedRef.current = false; detachPending.current = false;
+        setDetached(false); setDockPreview(null);
+        if (drop) {
+          const nextDock = canUseDock && drop.x < 132 ? 'left' : canUseDock && drop.x > window.innerWidth - 132 ? 'right' : 'floating';
+          setPanelState(previous => {
+            const next = { ...previous, x: Math.max(6, drop.x - 70), y: Math.max(6, drop.y - 18), dock: nextDock as GroupManagerDock };
+            savePanelState(id, next);
+            return next;
+          });
+          setDockValue(nextDock);
+        } else if (canUseDock) updateRegistry(id, effectiveDock);
+        window.dispatchEvent(new Event('pile-numbering-dock-layout-changed'));
+      },
+      onDrag: drop => {
+        const inside = drop.x >= 0 && drop.x <= window.innerWidth && drop.y >= dockOffsetTop && drop.y <= window.innerHeight - dockOffsetBottom;
+        if (inside && drop.finished) returnPanelWindow(id, drop);
+        else setDockPreview(inside && canUseDock ? drop.x < 132 ? 'left' : drop.x > window.innerWidth - 132 ? 'right' : null : null);
+      }
+    });
+    if (!started) detachPending.current = false;
+  };
+  const detachRef = useRef(detach);
+  detachRef.current = detach;
+
   useEffect(() => {
     bringToFront();
-    if (canUseDock) updateRegistry(id, effectiveDock);
+    if (canUseDock && !detached) updateRegistry(id, effectiveDock);
     else removeFromRegistry(id);
     setDockVersion((value) => value + 1);
     return () => removeFromRegistry(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, canUseDock, effectiveDock]);
+  }, [id, canUseDock, effectiveDock, detached]);
 
   useEffect(() => {
     const onLayoutChange = () => setDockVersion((value) => value + 1);
@@ -345,6 +405,10 @@ export function DraggablePanel({
 
       const drag = dragRef.current;
       if (!drag) return;
+      if (nativeReady && !detachPending.current && (event.clientX < -2 || event.clientY < -2 || event.clientX > window.innerWidth + 2 || event.clientY > window.innerHeight + 2)) {
+        detachRef.current(true);
+        return;
+      }
 
       const nextX = clamp(drag.panelX + event.clientX - drag.startX, 6, window.innerWidth - 80);
       const nextY = clamp(drag.panelY + event.clientY - drag.startY, 6, window.innerHeight - 60);
@@ -376,10 +440,15 @@ export function DraggablePanel({
       window.removeEventListener('mouseup', onUp);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canUseDock, dockOffsetBottom, dockOffsetTop, dockPreview, dockMaxWidth, effectiveDock, id, isDocked, minHeight, minWidth]);
+  }, [canUseDock, dockOffsetBottom, dockOffsetTop, dockPreview, dockMaxWidth, effectiveDock, id, isDocked, minHeight, minWidth, nativeReady]);
 
   const startDrag = (event: React.MouseEvent) => {
     if ((event.target as HTMLElement).closest('button,input,select,label,textarea')) return;
+    if (detached) {
+      event.preventDefault();
+      beginNativePanelMove(id);
+      return;
+    }
     bringToFront();
     if (isDocked) {
       const next = {
@@ -423,7 +492,8 @@ export function DraggablePanel({
     event.stopPropagation();
   };
 
-  const style: CSSProperties = isDocked
+  const style: CSSProperties = detached ? { position: 'relative', left: 0, top: 0, width: '100%', height: '100%', minWidth: 0, minHeight: 0 }
+    : isDocked
     ? {
         left: effectiveDock === 'left' ? dockOffset : undefined,
         right: effectiveDock === 'right' ? dockOffset : undefined,
@@ -447,19 +517,21 @@ export function DraggablePanel({
   const showLeftResize = !isDocked || effectiveDock === 'right';
   const showRightResize = !isDocked || effectiveDock === 'left';
 
-  return (
+  const panel = (
     <>
-      {dockPreview && <div className={`dock-anchor dock-anchor-${dockPreview}`}>Закрепить окно {dockPreview === 'left' ? 'слева' : 'справа'}</div>}
       <section
-        key={dockVersion}
+        data-panel-id={id}
+        data-dock-layout-version={dockVersion}
         className={`floating-panel draggable-panel ${isDocked ? `docked-panel docked-${effectiveDock}` : ''} ${className ?? ''}`.trim()}
         style={style}
         onMouseDown={bringToFront}
+        onMouseDownCapture={() => activatePanelRoot(id)}
       >
         <div className="floating-panel-head drag-handle" onMouseDown={startDrag}>
           <strong>{title}</strong>
           <div className="panel-actions">
-            {canUseDock && !isDocked && (
+            {nativeReady && <button className="btn small" title={detached ? 'Вернуть в основное окно' : 'Вынести за пределы основного окна'} aria-label={detached ? 'Вернуть в основное окно' : 'В отдельное окно'} onClick={() => detached ? returnPanelWindow(id) : detach(false)}>{detached ? '↙' : '↗'}</button>}
+            {canUseDock && !isDocked && !detached && (
               <>
                 <button className="btn small" data-tooltip="Закрепить окно слева" onClick={() => setDockValue('left')}>⇤</button>
                 <button className="btn small" data-tooltip="Закрепить окно справа" onClick={() => setDockValue('right')}>⇥</button>
@@ -484,11 +556,12 @@ export function DraggablePanel({
         </div>
         <div className="floating-panel-body">{children}</div>
 
-        {showLeftResize && <div className="resize-handle resize-left" onMouseDown={(event) => startResize('left', event)} />}
-        {showRightResize && <div className="resize-handle resize-right" onMouseDown={(event) => startResize('right', event)} />}
-        {!isDocked && <div className="resize-handle resize-bottom" onMouseDown={(event) => startResize('bottom', event)} />}
-        {!isDocked && <div className="resize-handle resize-corner" onMouseDown={(event) => startResize('corner', event)} />}
+        {showLeftResize && !detached && <div className="resize-handle resize-left" onMouseDown={(event) => startResize('left', event)} />}
+        {showRightResize && !detached && <div className="resize-handle resize-right" onMouseDown={(event) => startResize('right', event)} />}
+        {!isDocked && !detached && <div className="resize-handle resize-bottom" onMouseDown={(event) => startResize('bottom', event)} />}
+        {!isDocked && !detached && <div className="resize-handle resize-corner" onMouseDown={(event) => startResize('corner', event)} />}
       </section>
     </>
   );
+  return <>{dockPreview && <div className={`dock-anchor dock-anchor-${dockPreview}`}>Закрепить окно {dockPreview === 'left' ? 'слева' : 'справа'}</div>}<div ref={inlineMount} className="panel-inline-mount" />{createPortal(panel, portalMount)}</>;
 }

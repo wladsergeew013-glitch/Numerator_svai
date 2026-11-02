@@ -740,6 +740,7 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
             <div className="settings-help">
               Откройте выбранную версию nanoCAD с Model Studio и чертёж перед импортом или экспортом. Если выбранная версия недоступна, появится предупреждение. Режим «Автоматически» ищет любую запущенную версию.
             </div>
+            <div className="settings-help">В nanoCAD 26 объекты читает и изменяет встроенный SDK-модуль. Он загружается в открытый CAD при начале обмена. Для предыдущих версий используется прежнее подключение.</div>
             {nanoCadStatus && <div className="settings-help" role="status">{nanoCadStatus}</div>}
           </div>
         )}

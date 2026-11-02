@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { previewAutoClusters } from '../api/client';
 import { connectedAutoClusters, useProjectStore } from '../store/useProjectStore';
 import { CLUSTER_METHODS, DEFAULT_CLUSTER_OPTIONS, type ClusterMethod, type ClusterOptions, type ClusterPreview } from '../types/clustering';
@@ -111,7 +110,7 @@ export function AutoClusterDialog({ onClose }: { onClose: () => void }) {
     && options.angle >= -180 && options.angle <= 180
     && options.xi > 0 && options.xi < 1;
 
-  return createPortal(<div className="auto-cluster-backdrop" onMouseDown={e => e.stopPropagation()}>
+  return <div className="auto-cluster-backdrop" onMouseDown={e => e.stopPropagation()}>
     <div ref={dialog} className="auto-cluster-dialog" role="dialog" aria-modal="true" aria-labelledby="auto-cluster-title"
       onKeyDown={e => {
         e.stopPropagation();
@@ -166,5 +165,5 @@ export function AutoClusterDialog({ onClose }: { onClose: () => void }) {
         <div><button className="btn" onClick={onClose}>Отмена</button><button className="btn primary" onClick={apply} disabled={!result?.clusters.length || busy}>Применить разбиение</button></div>
       </footer>
     </div>
-  </div>, document.body);
+  </div>;
 }

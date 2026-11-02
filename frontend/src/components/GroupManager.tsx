@@ -14,6 +14,7 @@ import {
 } from '../types/project';
 import { NumberingMethodPreview } from './NumberingMethodPreview';
 import { DraggablePanel } from './DraggablePanel';
+import { PanelOverlay } from './PanelOverlay';
 
 interface Props {
   toolbarHeight: number;
@@ -722,9 +723,9 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
       {numberingError && <div role="alert">{numberingError}</div>}
       {renderGroupSettings(detailsGroup, detailsGroup.order - 1)}
     </DraggablePanel>}
-      {autoClusterOpen && <AutoClusterDialog onClose={() => setAutoClusterOpen(false)} />}
+      {autoClusterOpen && <PanelOverlay><AutoClusterDialog onClose={() => setAutoClusterOpen(false)} /></PanelOverlay>}
       {cadConfirm && (
-        <div className="cad-confirm-backdrop" onClick={() => setCadConfirm(null)} onMouseDown={stop}>
+        <PanelOverlay><div className="cad-confirm-backdrop" onClick={() => setCadConfirm(null)} onMouseDown={stop}>
           <div className="cad-confirm-dialog" onClick={stop} onMouseDown={stop}>
             <div className="cad-confirm-title">{cadConfirm.title}</div>
             <div className="cad-confirm-message">{cadConfirm.message}</div>
@@ -743,7 +744,7 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
               </button>
             </div>
           </div>
-        </div>
+        </div></PanelOverlay>
       )}
     </>
   );

@@ -164,6 +164,8 @@ if defined EXE_ICON (
 )
 
 echo [INFO] Building desktop EXE with PyInstaller...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\09_build_sdk_bridge.ps1" >> "%LOG_FILE%" 2>&1
+if errorlevel 1 goto fail_with_log
 >> "%LOG_FILE%" echo [INFO] Running PyInstaller.
 "%VENV_PY%" -m PyInstaller --noconfirm --distpath "%ROOT%\dist" --workpath "%ROOT%\build" "%ROOT%\tools\PileNumbering.spec" >> "%LOG_FILE%" 2>&1
 if errorlevel 1 goto fail_with_log

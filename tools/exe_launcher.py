@@ -271,13 +271,27 @@ class DesktopApi:
         self._ready = False
         self._shown = False
         self._allow_close = False
+        self._panels = None
         # Session-only state: the next dialog starts where the user last chose a project.
         self._project_dialog_dir = APP_DIR / "projects"
 
     def frontendReady(self) -> None:  # noqa: N802
+        if self._panels is None and self._window is not None and sys.platform.startswith('win'):
+            try:
+                from System import Action
+                from app.desktop_panels import NativePanelWindows
+                self._panels = NativePanelWindows(self._window, APP_DIR / 'config')
+                self._window.native.Invoke(Action(self._panels.install))
+            except Exception:
+                self._panels = None
+                logging.exception('Could not enable native panel windows')
         self._ready = True
         logging.info("Frontend ready: first paint completed, desktop bridge connected")
         self._finish_startup()
+
+    def startPanelMove(self, panel_id: str) -> None:  # noqa: N802
+        if self._panels is not None:
+            self._panels.begin_move(panel_id)
 
     def _on_shown(self) -> None:
         self._shown = True
@@ -292,6 +306,9 @@ class DesktopApi:
     def closeConfirmed(self) -> None:  # noqa: N802
         if self._window is not None:
             self._allow_close = True
+            if self._panels is not None:
+                from System import Action
+                self._window.native.Invoke(Action(self._panels.shutdown))
             self._window.destroy()
 
     def _on_closing(self) -> bool:

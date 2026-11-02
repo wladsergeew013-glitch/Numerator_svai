@@ -5241,3 +5241,7 @@ button, input, select { font: inherit; }
 .startup-empty { margin: 0; padding: 23px; border: 1px dashed #48617e; border-radius: 8px; color: #abc2db; text-align: center; font-size: 13px; }
 .startup-error { padding: 12px 15px; border: 1px solid #bd6574; border-radius: 8px; color: #ffe0e6; background: #452430; }
 @media (max-width: 900px) { .startup-layout { grid-template-columns: 1fr; } .startup-actions { align-self: stretch; } .startup-project-columns { grid-template-rows: auto auto; } .startup-project-list { max-height: 280px; } }
+.panel-inline-mount, .panel-portal-mount { display: contents; }
+.detached-panel-window { margin: 0; width: 100vw; height: 100vh; overflow: hidden; }
+.detached-panel-window .panel-portal-mount { display: block; width: 100%; height: 100%; }
+.detached-panel-window .floating-panel.draggable-panel { box-sizing: border-box; border-radius: 0; box-shadow: none; max-height: none; }

@@ -5,9 +5,14 @@ from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
 datas = [(str(ROOT / 'frontend' / 'dist'), 'frontend_dist')]
+sdk_bridge = ROOT / 'cad_bridge' / 'bin' / 'nanoCAD26' / 'PileNumbering.Sdk26.nrx'
+if not sdk_bridge.is_file():
+    raise SystemExit('Build the nanoCAD 26 SDK bridge first: tools/09_build_sdk_bridge.ps1')
+datas.append((str(sdk_bridge), 'cad_bridge'))
 binaries = []
 hiddenimports = ['app.main', 'app.cad_operations', 'app.schemas', 'app.io_project', 'app.numbering_rows', 'app.numbering_route', 'app.numbering_vector', 'app.numbering_manual', 'app.clustering_auto', 'app.clustering_methods', 'app.clustering_learning', 'app.sync_import', 'uvicorn.logging', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on', 'h11', 'anyio', 'starlette.staticfiles', 'starlette.responses', 'webview.platforms.edgechromium', 'win32com.client', 'pythoncom', 'pywintypes']
 hiddenimports += collect_submodules('uvicorn')
+hiddenimports += ['app.sdk_bridge', 'app.desktop_panels']
 hiddenimports += collect_submodules('fastapi')
 hiddenimports += collect_submodules('starlette')
 hiddenimports += collect_submodules('pydantic')

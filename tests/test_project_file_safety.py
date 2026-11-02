@@ -60,6 +60,26 @@ class ProjectFileSafetyTests(unittest.TestCase):
             with self.assertRaises(HTTPException):
                 api.open_local_project_location('missing.pilenum.json')
 
+    def test_project_with_spaces_and_bom_opens_from_lists_without_renaming(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(api, 'PROJECTS_DIR', Path(folder) / 'projects'), \
+                patch.object(api, 'CONFIG_DIR', Path(folder) / 'config'):
+            api.PROJECTS_DIR.mkdir()
+            project = PileProject()
+            project.project.name = 'Новый проект'
+            path = api.PROJECTS_DIR / 'Новый проект.pilenum.json'
+            path.write_text(project.model_dump_json(), encoding='utf-8-sig')
+            before = path.read_bytes()
+            opened = api.open_local_project(path.name)
+            self.assertEqual(opened.project.id, project.project.id)
+            recent = api.list_recent_project_entries()['projects']
+            self.assertEqual(recent[0]['fileName'], path.name)
+            self.assertEqual(api.open_recent_project(recent[0]['id']).project.id, project.project.id)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse((api.PROJECTS_DIR / 'Новый_проект.pilenum.json').exists())
+            for invalid in ('../Новый проект.pilenum.json', 'other\\project.pilenum.json'):
+                with self.assertRaises(HTTPException):
+                    api.open_local_project(invalid)
+
 
 if __name__ == '__main__':
     unittest.main()
