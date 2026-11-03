@@ -1,5 +1,7 @@
 # Нумератор свайного поля
 
+Иллюстрированное руководство пользователя описывает импорт из Excel и nanoCAD, работу с группами, нумерацию, проверку и запись номеров в DWG. 17 страниц и 27 снимков интерфейса. [PDF](docs/PileNumbering_User_Guide_RU.pdf) · [Word](docs/PileNumbering_User_Guide_RU.docx)
+
 ## Исправления обмена и авторазбивки, сентябрь 2026
 
 - Актуальный EXE находится только в `dist/PileNumbering.exe`. Сборка: `tools/06_build_exe.bat`, единая переносимая конфигурация — `tools/PileNumbering.spec`. Данные прежних тестовых сборок сохранены в `data/previous-builds`; рабочие проекты остаются в `dist/projects`.
