@@ -8,6 +8,7 @@ REM Location: <repo_root>\tools\01_run_dev.bat
 REM
 REM Fast local launch without Docker.
 REM Full reinstall: tools\01_run_dev.bat --setup
+REM Install dependencies without starting servers: tools\01_run_dev.bat --setup-only
 REM ================================================================
 
 set "TOOLS_DIR=%~dp0"
@@ -19,7 +20,9 @@ set "LOG=%OUT_DIR%\run_dev.log"
 set "BACKEND_LAUNCHER=%OUT_DIR%\_start_backend.bat"
 set "FRONTEND_LAUNCHER=%OUT_DIR%\_start_frontend.bat"
 set "FORCE_SETUP=0"
+set "SETUP_ONLY=0"
 if /I "%~1"=="--setup" set "FORCE_SETUP=1"
+if /I "%~1"=="--setup-only" set "SETUP_ONLY=1"
 
 > "%LOG%" echo ============================================================
 >>"%LOG%" echo RUN DEV - PILE NUMBERING APP
@@ -41,6 +44,10 @@ call :check_project || goto fail
 call :find_python || goto fail
 call :setup_backend || goto fail
 call :setup_frontend || goto fail
+if "%SETUP_ONLY%"=="1" (
+  echo [OK] Development environment is ready.
+  exit /b 0
+)
 call :write_launchers || goto fail
 
 echo.
@@ -138,8 +145,8 @@ set "VENV_BROKEN=0"
 
 if "%FORCE_SETUP%"=="1" (
   if exist "%VENV_DIR%" (
-    echo [INFO] Removing old backend venv (--setup)...
-    >>"%LOG%" echo [INFO] Removing old backend venv (--setup)...
+    echo [INFO] Removing old backend venv for --setup...
+    >>"%LOG%" echo [INFO] Removing old backend venv for --setup...
     rmdir /s /q "%VENV_DIR%" >>"%LOG%" 2>&1
   )
 )
@@ -185,12 +192,7 @@ if errorlevel 1 (
 
 echo [INFO] Installing backend requirements...
 >>"%LOG%" echo [INFO] Installing backend requirements...
-"%VENV_PY%" -m pip install --upgrade pip >>"%LOG%" 2>&1
-if errorlevel 1 (
-  echo [ERROR] Failed to upgrade pip.
-  exit /b 1
-)
-"%VENV_PY%" -m pip install -r "%ROOT%\backend\requirements.txt" >>"%LOG%" 2>&1
+"%VENV_PY%" -m pip install --disable-pip-version-check -r "%ROOT%\backend\requirements.txt" >>"%LOG%" 2>&1
 if errorlevel 1 (
   echo [ERROR] Failed to install backend requirements.
   exit /b 1
@@ -226,23 +228,12 @@ if "%FORCE_SETUP%"=="1" (
 
 echo [INFO] Synchronizing frontend npm dependencies...
 >>"%LOG%" echo [INFO] Synchronizing frontend npm dependencies...
-pushd "%ROOT%\frontend"
-call npm install >>"%LOG%" 2>&1
+pushd "%ROOT%\frontend" || exit /b 1
+call npm ci >>"%LOG%" 2>&1
 if errorlevel 1 (
   popd
-  echo [ERROR] npm install failed.
+  echo [ERROR] npm ci failed.
   exit /b 1
-)
-call npm list xlsx --depth=0 >>"%LOG%" 2>&1
-if errorlevel 1 (
-  echo [INFO] xlsx package is missing. Installing explicitly...
-  >>"%LOG%" echo [INFO] xlsx package is missing. Installing explicitly...
-  call npm install xlsx >>"%LOG%" 2>&1
-  if errorlevel 1 (
-    popd
-    echo [ERROR] Failed to install xlsx package.
-    exit /b 1
-  )
 )
 popd
 exit /b 0
@@ -291,5 +282,5 @@ if exist "%LOG%" (
   echo Log file was not created.
 )
 echo.
-pause
+if "%SETUP_ONLY%"=="0" pause
 exit /b 1

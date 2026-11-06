@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Подготовить окружение нумератора",
+      "type": "process",
+      "command": "cmd.exe",
+      "args": ["/d", "/c", "tools\\01_run_dev.bat", "--setup-only"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}

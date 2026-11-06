@@ -60,6 +60,15 @@ backend/.venv/Scripts/python.exe tools/checks/compare_auto_clustering.py "path/t
 
 MVP-приложение для загрузки CSV с координатами свай, группировки точек и нумерации рядовым методом.
 
+## Быстрый запуск в VS Code
+
+1. Установите Python 3.12 или 3.13 x64, Node.js 22.12+ (или 24 LTS) и расширения Python и Python Debugger для VS Code.
+2. Откройте корень клона в VS Code через `code .` или **File → Open Folder**.
+3. В **Run and Debug** выберите **Нумератор свай (backend + frontend)** и нажмите **F5**. Задача подготовит `backend/.venv` и установит frontend-зависимости по lock-файлу.
+4. Откройте `http://127.0.0.1:5173`. Backend работает на порту 8000. Для остановки обоих серверов нажмите **Shift+F5**.
+
+Для работы с файлами SDK не требуется. Для сборки моста nanoCAD 26 укажите расположение SDK по [инструкции](docs/NANOCAD26_SDK_RU.md). Лог подготовки окружения находится в `tools/out/run_dev.log`.
+
 ## Запуск через Docker
 
 ```bash
@@ -94,7 +103,7 @@ Frontend:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 

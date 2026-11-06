@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Backend (FastAPI)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/backend/.venv/Scripts/python.exe",
+      "module": "uvicorn",
+      "args": ["app.main:app", "--host", "127.0.0.1", "--port", "8000"],
+      "cwd": "${workspaceFolder}/backend",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Frontend (Vite)",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--host", "127.0.0.1", "--strictPort"],
+      "cwd": "${workspaceFolder}/frontend",
+      "env": { "VITE_API_BASE": "http://127.0.0.1:8000" },
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Нумератор свай (backend + frontend)",
+      "configurations": ["Backend (FastAPI)", "Frontend (Vite)"],
+      "preLaunchTask": "Подготовить окружение нумератора",
+      "stopAll": true
+    }
+  ]
+}
