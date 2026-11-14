@@ -141,7 +141,7 @@ Windows: 111 Python-тестов пройдены после последнег�
 
 ## EXE и постоянные данные
 
-Финальная сборка PyInstaller завершена. Версия: 0.3.2. Runtime source digest: `624cc6364ea218418adf3d959cca91f660e5b8ef042998ad4e604315c81d6cd0`. Выбранная иконка: `tools/app_icon.ico`. Финальный EXE успешно собран. После остановки Computer Use клавишей Escape новые окна не открывались; bootloader/WebView2, назначенная custom icon на экране и restart окончательного EXE не объявляются проверенными. Более ранний кандидат с другим source digest запускался до дополнительного ревью, что не заменяет приёмку окончательного файла.
+Финальная сборка PyInstaller завершена. Версия: 0.3.2. Runtime source digest: `937cf261591017011bcbf472720ed5036860cf87ba7ee8a77e5e5a95106ae740`. Выбранная иконка: `tools/app_icon.ico`. Финальный EXE успешно собран. После остановки Computer Use клавишей Escape новые окна не открывались; bootloader/WebView2, назначенная custom icon на экране и restart окончательного EXE не объявляются проверенными. Более ранний кандидат с другим source digest запускался до дополнительного ревью, что не заменяет приёмку окончательного файла.
 
 ## Границы приёмки
 
@@ -160,3 +160,5 @@ DPI и несколько физических мониторов не испы�
 PN-073: официальные [Vite Windows path advisory](https://github.com/vitejs/vite/security/advisories/GHSA-fx2h-pf6j-xcff) и [launch-editor UNC advisory](https://github.com/vitejs/launch-editor/security/advisories/GHSA-v6wh-96g9-6wx3) указывают исправленный Vite 8.0.16; закреплён 8.3.8. Дополнительное независимое read-only исследование текущего кандидата не нашло подтверждённого surviving path в этой области.
 
 Окончательный EXE дополнительно проверен без окон: код app/launcher извлечён из его PYZ и исполнен двумя отдельными Windows Python-процессами с frozen-путями. Health/frontend/API 0.3.2, отказ без token, concurrent ownership 200/409, save → process restart → open/config/recent/custom-icon GET/autosave/ICO readback пройдены. Все постоянные пути находятся рядом с EXE. Это проверка встроенного кода с host dependencies; **не запуск bootloader и не визуальная проверка WebView2/командных иконок**. PE FileVersion/ProductVersion=0.3.2, встроено семь icon frames.
+
+Lockfile дополнен отсутствовавшими optional @emnapi/core и @emnapi/runtime 2.0.0-beta.2 для чистых npm 10.9.9 runners; ранее выбранные версии не менялись. Чистые npm ci и production build с npm 10.9.9 пройдены.
