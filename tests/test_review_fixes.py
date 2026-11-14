@@ -111,6 +111,21 @@ class ReviewBackendTests(unittest.TestCase):
         self.assertEqual(self.client.get(icon['url']).status_code, 404)
         self.assertNotIn('file.save', api.get_user_config().commandIcons)
 
+    def test_PN054_local_process_icon_cookies_do_not_overwrite_each_other(self):
+        import subprocess
+        import app.http_boundary as boundary
+        env={**os.environ,'PYTHONPATH':str(Path(__file__).resolve().parents[1]/'backend')}
+        names=[subprocess.check_output([sys.executable,'-c','from app.http_boundary import SESSION_COOKIE; print(SESSION_COOKIE)'],env=env,text=True).strip() for _ in range(2)]
+        self.assertNotEqual(names[0],names[1])
+        content=io.BytesIO();Image.new('RGBA',(16,16),'orange').save(content,'PNG')
+        icon=self.client.post('/api/assets/icons',files={'file':('fixture.png',content.getvalue())}).json()['icon']['url']
+        shared_cookie=f'{names[0]}={"A"*43}; {names[1]}={"B"*43}'
+        for name,token in zip(names,['A'*43,'B'*43]):
+            with patch.object(boundary,'SESSION_COOKIE',name),patch.object(boundary,'SESSION_TOKEN',token):
+                client=TestClient(api.app,client=('127.0.0.1',50000),base_url='http://127.0.0.1:8000',headers={'Cookie':shared_cookie})
+                self.assertEqual(client.get(icon).status_code,200)
+                self.assertEqual(client.get('/api/config/user').status_code,401,'Ambient image cookies must never authorize privileged API calls')
+
     def test_PN057_local_api_boundary_and_handshake(self):
         unauth = TestClient(api.app, client=('127.0.0.1',50000), base_url='http://127.0.0.1:8000')
         for url, method in [('/api/config/user', 'get'), ('/api/projects/local', 'get'), ('/api/system/select-folder', 'get'), ('/api/nanocad/operations', 'post')]:

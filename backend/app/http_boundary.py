@@ -12,6 +12,9 @@ from http.cookies import SimpleCookie
 from starlette.responses import JSONResponse
 
 SESSION_TOKEN = secrets.token_urlsafe(32)
+# Cookies are scoped by host, not port. Separate local app processes must not
+# overwrite each other's passive-image credential on the same loopback host.
+SESSION_COOKIE = 'pile_session_' + secrets.token_hex(8)
 DEV_ORIGINS = {'http://localhost:5173', 'http://127.0.0.1:5173'}
 MAX_BODY = 16_200_000
 
@@ -73,7 +76,7 @@ class LocalApiBoundary:
                 if scope['method'] != 'POST' or headers.get('x-pile-client') != '1':
                     return await reject(403, 'Explicit local client handshake is required')
                 response = JSONResponse({'token': SESSION_TOKEN}, headers={'Cache-Control': 'no-store'})
-                response.set_cookie('pile_session', SESSION_TOKEN, httponly=True, samesite='strict', path='/api')
+                response.set_cookie(SESSION_COOKIE, SESSION_TOKEN, httponly=True, samesite='strict', path='/api')
                 if origin: response.headers.update({'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Credentials': 'true', 'Vary': 'Origin'})
                 return await response(scope, receive, send)
             cookie = SimpleCookie()
@@ -83,7 +86,7 @@ class LocalApiBoundary:
             # no-referrer request from another localhost port cannot invoke a
             # privileged GET using an ambient cookie.
             image_read = path.startswith('/api/assets/icons/') and scope['method'] in ('GET', 'HEAD')
-            token = headers.get('x-pile-token', '') or (cookie['pile_session'].value if image_read and 'pile_session' in cookie else '')
+            token = headers.get('x-pile-token', '') or (cookie[SESSION_COOKIE].value if image_read and SESSION_COOKIE in cookie else '')
             if not hmac.compare_digest(token.encode('utf-8'), SESSION_TOKEN.encode('ascii')):
                 return await reject(401, 'Local session credential is required')
         limit = 2_100_000 if path in {'/api/config/app-icon', '/api/assets/icons'} else MAX_BODY

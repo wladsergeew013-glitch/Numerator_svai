@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
+const vm = require('node:vm');
 const root = path.resolve(__dirname, '../..');
 const ts = require(path.join(root, 'frontend/node_modules/typescript'));
 const cache = new Map();
@@ -216,6 +217,14 @@ const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;
   console.log('PASS PN-006/042: delayed read/position/write cannot alter another session or edited source point; stale Canvas editor cannot save into copied IDs.');
 
   const client=load('frontend/src/api/client.ts'), requests=[];let disk=null, active=0,maxActive=0;
+  const {developmentApiBase}=declarations('frontend/src/api/client.ts',['developmentApiBase']);
+  for(const host of ['127.0.0.1','localhost'])assert.equal(new URL(developmentApiBase(host)).hostname,host,'Dev page and asset-cookie host stay on the same site');
+  for(const host of ['127.0.0.1','localhost',undefined]) {
+    const exports={}, source=fs.readFileSync(path.join(root,'frontend/src/api/client.ts'),'utf8').replaceAll('import.meta.env','({DEV:true})');
+    vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,
+      {exports,location:host?{hostname:host}:undefined,require:()=>load('frontend/src/utils/projectSaves.ts')});
+    assert.equal(new URL(exports.API_BASE).hostname,host??'localhost','Actual dev client also loads in a worker/SSR realm without window');
+  }
   global.fetch=async(url,init)=>{
     if(url.endsWith('/api/session'))return {ok:true,json:async()=>({token:'fixture-token'})};
     assert.ok(url.endsWith('/api/projects/local/save'));const response=defer(), payload=JSON.parse(init.body);active++;maxActive=Math.max(maxActive,active);

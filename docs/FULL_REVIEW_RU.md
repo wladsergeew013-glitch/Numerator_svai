@@ -6,7 +6,7 @@
 
 ## Как воспроизвести проверки
 
-- **T**: `backend/.venv/Scripts/python.exe -m unittest discover -s tests -q` — 111 тестов; новые контрпримеры в `tests/test_review_fixes.py`, прежние проверки не исключались. Linux запускает тот же suite в Python 3.12 Docker image.
+- **T**: `backend/.venv/Scripts/python.exe -m unittest discover -s tests -q` — 112 тестов; новые контрпримеры в `tests/test_review_fixes.py`, прежние проверки не исключались. Linux запускает тот же suite в Python 3.12 Docker image.
 - **S**: `node tools/checks/project_session_check.cjs` — настоящие store/React-обработчики с управляемым транспортом, jsdom для keyboard/modal; это не полный browser E2E.
 - **N**: `node tools/checks/transfer_regression_check.cjs` — матрица закреплённых номеров: 192 сочетания × 2 запуска, плюс конкретные контрпримеры передачи/нумерации.
 - **K**: `node tools/checks/cad_scan_workflow_check.cjs` — настоящие frontend CAD-обработчики с моделью транспорта.
@@ -135,13 +135,13 @@ V: `node tools/checks/vite_dev_check.cjs`. Временные файлы син�
 
 ## Итоговые прогоны
 
-Windows: 111 Python-тестов пройдены после последнего изменения runtime-кода. Linux: те же 111 тестов пройдены в контейнере; pip check без нарушений. Реальный Docker save/config/recent/autosave → recreate → reopen пройден на собственном volume; публикация портов только loopback, пользовательские данные не затронуты. Production frontend build и все 11 contract/workflow checks пройдены. `pip check` успешен; `npm audit` не сообщил известных уязвимостей установленного lockfile.
+Windows: 112 Python-тестов пройдены после последнего изменения runtime-кода. Linux: те же 112 тестов пройдены в контейнере; pip check без нарушений. Реальный Docker save/config/recent/autosave → recreate → reopen пройден на собственном volume; публикация портов только loopback, пользовательские данные не затронуты. Production frontend build и все 11 contract/workflow checks пройдены. `pip check` успешен; `npm audit` не сообщил известных уязвимостей установленного lockfile.
 
 Проверки legacy harness обновлены под реальную архитектуру, без отключения прежних assertions: operation-log transport знает обязательный bootstrap и Headers; CAD CJS loader преобразует `import.meta.url` для загрузки worker-модуля; runtime path contract проверяет владеющий модуль RuntimePaths.
 
 ## EXE и постоянные данные
 
-Финальная сборка PyInstaller завершена. Версия: 0.3.2. Runtime source digest: `937cf261591017011bcbf472720ed5036860cf87ba7ee8a77e5e5a95106ae740`. Выбранная иконка: `tools/app_icon.ico`. Финальный EXE успешно собран. После остановки Computer Use клавишей Escape новые окна не открывались; bootloader/WebView2, назначенная custom icon на экране и restart окончательного EXE не объявляются проверенными. Более ранний кандидат с другим source digest запускался до дополнительного ревью, что не заменяет приёмку окончательного файла.
+Финальная сборка PyInstaller завершена. Версия: 0.3.2. Runtime source digest: `f4bc2c1cc404fcc6b5a4f501133e0ccdd468fd891820fab6efdce6bfe44b2df0`. Выбранная иконка: `tools/app_icon.ico`. Финальный EXE успешно собран. После остановки Computer Use клавишей Escape новые окна не открывались; bootloader/WebView2, назначенная custom icon на экране и restart окончательного EXE не объявляются проверенными. Более ранний кандидат с другим source digest запускался до дополнительного ревью, что не заменяет приёмку окончательного файла.
 
 ## Границы приёмки
 
@@ -162,3 +162,7 @@ PN-073: официальные [Vite Windows path advisory](https://github.com/v
 Окончательный EXE дополнительно проверен без окон: код app/launcher извлечён из его PYZ и исполнен двумя отдельными Windows Python-процессами с frozen-путями. Health/frontend/API 0.3.2, отказ без token, concurrent ownership 200/409, save → process restart → open/config/recent/custom-icon GET/autosave/ICO readback пройдены. Все постоянные пути находятся рядом с EXE. Это проверка встроенного кода с host dependencies; **не запуск bootloader и не визуальная проверка WebView2/командных иконок**. PE FileVersion/ProductVersion=0.3.2, встроено семь icon frames.
 
 Lockfile дополнен отсутствовавшими optional @emnapi/core и @emnapi/runtime 2.0.0-beta.2 для чистых npm 10.9.9 runners; ранее выбранные версии не менялись. Чистые npm ci и production build с npm 10.9.9 пройдены.
+
+Совместимость PN-054/057: dev API сохраняет имя хоста страницы (`127.0.0.1` или `localhost`), чтобы пассивные иконки получали Strict cookie при разных портах одного сайта. Runtime helper проверен для обоих имён; production bundle остаётся same-origin и не изменился. [Правило SameSite](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie#samesitesamesite-value). Защита API не ослаблена.
+
+Пассивные image cookies имеют отдельное имя для каждого процесса: второй локальный экземпляр не заменяет credential первого. Проверены реальные имена из двух Python-процессов и общий Cookie-header для двух credential; обе иконки читаются, cookie-only privileged GET остаётся 401. Dev client дополнительно загружается в worker/SSR realm без window.
