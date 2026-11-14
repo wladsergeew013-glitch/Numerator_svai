@@ -23,7 +23,6 @@ import sys
 import threading
 import time
 import traceback
-import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -46,6 +45,9 @@ def _bundle_dir() -> Path:
 
 APP_DIR = _exe_dir()
 BUNDLE_DIR = _bundle_dir()
+if (APP_DIR / 'backend').is_dir():
+    sys.path.insert(0, str(APP_DIR / 'backend'))
+from app.project_files import atomic_write_project, ensure_same_project, save_project_file
 LOG_DIR = APP_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "exe_launcher.log"
@@ -367,8 +369,7 @@ class DesktopApi:
             window = self._window or (webview.windows[0] if webview.windows else None)
             if window is None:
                 fallback = APP_DIR / safe_name
-                _ensure_same_project_before_replace(fallback, content)
-                _atomic_write_project(fallback, str(content))
+                save_project_file(fallback, str(content))
                 return {"saved": True, "path": str(fallback)}
 
             result = window.create_file_dialog(
@@ -386,8 +387,7 @@ class DesktopApi:
             if not path.name.lower().endswith(".json"):
                 path = path.with_name(f"{path.name}.pilenum.json")
             path.parent.mkdir(parents=True, exist_ok=True)
-            _ensure_same_project_before_replace(path, content)
-            _atomic_write_project(path, str(content))
+            save_project_file(path, str(content))
             logging.info("JSON project exported through desktop dialog: %s", path)
             return {"saved": True, "path": str(path)}
         except Exception as exc:  # noqa: BLE001 - diagnostics returned to frontend
@@ -396,30 +396,11 @@ class DesktopApi:
 
 
 def _atomic_write_project(path: Path, content: str) -> None:
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False) as stream:
-            temporary = Path(stream.name)
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary.replace(path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+    atomic_write_project(path, content)
 
 
 def _ensure_same_project_before_replace(path: Path, content: str) -> None:
-    if not path.exists():
-        return
-    import json
-    try:
-        existing_id = str(json.loads(path.read_text(encoding="utf-8"))["project"]["id"])
-        incoming_id = str(json.loads(content)["project"]["id"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise ValueError(f"Файл {path.name} уже существует. Не удалось проверить, что это тот же проект.") from exc
-    if existing_id != incoming_id:
-        raise ValueError(f"Файл {path.name} принадлежит другому проекту. Выберите другое имя файла.")
+    ensure_same_project(path, content)
 
 
 def _splash_message(message: str) -> None:

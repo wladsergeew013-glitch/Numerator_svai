@@ -18,8 +18,10 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError, Field
 from app import cad_operations as cad
+from app.version import APP_VERSION
 
 from app.io_project import import_points_from_csv
+from app.project_files import ProjectFileConflict, save_project_file
 from app.recent_projects import list_recent_projects as read_recent_projects, remember_recent_project
 from app.numbering_rows import apply_numbering_rows
 from app.clustering_methods import ClusterPreviewRequest, preview_clusters
@@ -37,7 +39,7 @@ from app.schemas import (
     ValidateProjectResponse,
 )
 
-app = FastAPI(title="Pile Numbering API", version="0.3.0")
+app = FastAPI(title="Pile Numbering API", version=APP_VERSION)
 
 
 @app.post('/api/clustering/preview')
@@ -424,18 +426,14 @@ def save_local_project(project: PileProject) -> LocalProjectSaveResponse:
     project.project.updatedAt = datetime.now(timezone.utc).isoformat()
     file_name = _safe_file_name(project.project.name)
     path = _safe_project_path(file_name)
-    if path.exists():
-        try:
-            saved_id = str(json.loads(path.read_text(encoding='utf-8'))['project']['id'])
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise HTTPException(409, f'Файл {path.name} уже существует и не удалось проверить его владельца. Выберите другое имя проекта.') from exc
-        if saved_id != project.project.id or str(project.project.fileName or '').casefold() != path.name.casefold():
-            raise HTTPException(409, f'Файл {path.name} уже принадлежит другому проекту. Переименуйте текущий проект перед сохранением.')
     project.project.fileName = path.name
     payload = project.model_dump(mode="json", exclude={"gridSettings", "viewSettings"})
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
+    try:
+        save_project_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
+    except ProjectFileConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(503, str(exc)) from exc
     remember_recent_project(CONFIG_DIR, path)
     return LocalProjectSaveResponse(saved=True, fileName=path.name, name=project.project.name)
 
@@ -508,9 +506,12 @@ def autosave_project(request: AutosaveProjectRequest) -> AutosaveProjectResponse
     file_name = _autosave_file_name(project)
     path = folder / file_name
     payload = project.model_dump(mode="json")
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
+    try:
+        save_project_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
+    except ProjectFileConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(503, str(exc)) from exc
     return AutosaveProjectResponse(saved=True, fileName=file_name, path=str(path))
 
 

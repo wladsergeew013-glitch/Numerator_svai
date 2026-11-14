@@ -1,9 +1,11 @@
 import { CommandIcon } from './CommandIcon';
+import { APP_VERSION } from '../version';
 import { CadOperationProgress } from './CadOperationProgress';
 import { runFileOperation } from '../utils/operationLog';
 import { ChangeEvent, CSSProperties, ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CadOperationCancelled, exportNanoCadBlocks, exportNanoCadModelStudioObjects, getUserConfig, importCsv, importNanoCadBlocks, importNanoCadModelStudioObjects, listLocalProjects, openLocalProject, openLocalProjectLocation, pickNanoCadBlockSample, saveLocalProject, saveUserConfig, scanNanoCadBlocks, scanNanoCadModelStudioObjects, type CadProgress, type NanoCadBlockSummary, type NanoCadModelStudioObjectSummary } from '../api/client';
 import { useProjectStore } from '../store/useProjectStore';
+import { assertProjectContext, captureProjectContext, isProjectSession, openProjectSafely, runProjectTransition, type ProjectContext } from '../utils/projectSession';
 import { LocalProjectInfo, PileGroup, PilePoint, PileProject } from '../types/project';
 import { DraggablePanel } from './DraggablePanel';
 import { WorkspaceSettingsPanel } from './WorkspaceSettingsPanel';
@@ -25,7 +27,6 @@ const RIBBON_DENSITY_KEY = 'pile-numbering:ribbon-density:v1';
 const DEFAULT_TOOLBAR_HEIGHT = 132;
 const MIN_TOOLBAR_HEIGHT = 124;
 const MAX_TOOLBAR_HEIGHT = 280;
-const APP_VERSION = '0.3.0';
 const ABOUT_EMAIL = 'vvsergeev@proektirovanie.gazprom.ru';
 
 type RibbonMode = 'tabs' | 'all';
@@ -499,9 +500,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     autoAssignSelection,
     manualLinkClearMode,
     manualLinkClearSelection,
-    openProjectFromFile,
     createNewProject,
-    setProjectLocalFileName,
     setProjectName,
     pushHistory,
     applyRowsNumbering,
@@ -673,6 +672,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const openProjectInputRef = useRef<HTMLInputElement | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
+  const importPreviewContext = useRef<ProjectContext | null>(null);
   const ribbonScrollRef = useRef<HTMLDivElement | null>(null);
   const ribbonScrollLeftRef = useRef(0);
 
@@ -822,13 +822,15 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   };
 
   const writeProjectJson = async (asCopy: boolean) => {
+    const context = captureProjectContext();
     const report = (message: string) => { setProjectStatus(message); return message; };
     const { gridSettings: _gridSettings, viewSettings: _viewSettings, ...projectPayload } = project;
     const fileName = `${safeFileName(project.project.name || 'project')}${asCopy ? '_копия' : ''}.pilenum.json`;
     const jsonText = JSON.stringify(asCopy ? makeProjectCopy(project) : projectPayload, null, 2);
     const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
     const success = (path: string) => {
-      if (!asCopy) useProjectStore.getState().markProjectSaved(project);
+      if (!isProjectSession(context)) return 'Файл сохранён для предыдущего проекта.';
+      if (!asCopy) useProjectStore.getState().markProjectSaved(project, context.sessionId);
       return report(asCopy ? `Копия проекта сохранена: ${path}. Текущий проект не изменён.` : `Экспортирован JSON: ${path}`);
     };
 
@@ -889,16 +891,18 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     setCreateProjectOpen(true);
   };
 
-  const createProjectFromDialog = () => {
+  const createProjectFromDialog = async () => {
     const cleanName = createProjectName.trim();
     if (!cleanName) {
       setProjectStatus('Имя проекта не задано. Создание отменено.');
       return;
     }
-    createNewProject(cleanName);
-    setCreateProjectOpen(false);
-    setProjectsOpen(true);
-    setProjectStatus(`Создан новый пустой проект: ${cleanName}`);
+    try {
+      if (!await runProjectTransition(async () => cleanName, createNewProject)) return;
+      setCreateProjectOpen(false);
+      setProjectsOpen(true);
+      setProjectStatus(`Создан новый пустой проект: ${cleanName}`);
+    } catch (error) { setProjectStatus(error instanceof Error ? error.message : String(error)); }
   };
 
   const openRenameProjectDialog = () => {
@@ -942,6 +946,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   };
 
   const selectImportFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const context = captureProjectContext();
     const input = event.currentTarget;
     const file = input.files?.[0];
     if (!file) return;
@@ -949,6 +954,8 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     try {
       setImportStatus('Читаю файл...');
       const preview = await buildImportPreview(file);
+      assertProjectContext(context);
+      importPreviewContext.current = context;
       const xIndex = guessColumnIndex(preview.columns, [/^x$/i, /^х$/i, /coord.*x/i, /коорд.*x/i], 0);
       const yIndex = guessColumnIndex(preview.columns, [/^y$/i, /^у$/i, /coord.*y/i, /коорд.*y/i], Math.min(1, preview.columns.length - 1));
       const nIndex = preview.columns.findIndex((column) => /^(n|no|num|number|номер|№)$/i.test(column.trim()) || /номер/i.test(column));
@@ -989,9 +996,14 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
       return;
     }
     try {
+      if (importPreviewContext.current && !isProjectSession(importPreviewContext.current)) {
+        throw new Error('Файл выбран для другого проекта. Выберите файл импорта заново.');
+      }
+      const context = captureProjectContext();
       await runFileOperation('import', async () => {
         const normalized = makeNormalizedCsvFile(importPreview, xIndex, yIndex, numberIndex, { enabled: importUseBasePoint, x: baseX, y: baseY });
         const imported = await importCsv(normalized);
+        assertProjectContext(context);
         const withMeta = imported.map((point) => ({
           ...point,
           meta: {
@@ -1002,7 +1014,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
           }
         }));
         appendImportedPoints(importPreview.fileName, withMeta);
-        requestAnimationFrame(() => zoomExtents(canvasWidth, canvasHeight));
+        requestAnimationFrame(() => { if (isProjectSession(context)) zoomExtents(canvasWidth, canvasHeight); });
         setImportStatus(`Импортировано в текущий проект: ${importPreview.fileName}`);
         setProjectStatus(`Импорт добавлен в текущий проект: ${importPreview.fileName}${importUseBasePoint ? ` · базовая точка ${baseX}; ${baseY}` : ''}`);
         setImportPreview(null);
@@ -1157,6 +1169,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   };
 
   const confirmNanoCadBlockImport = async () => {
+    const context = captureProjectContext();
     if (!scanReady()) {
       setTransferTab('scan');
       setScanStatus('Для выбранной области нужен актуальный скан. Выполните его перед импортом.');
@@ -1195,12 +1208,13 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
           tolerance: 1
         });
 
+        assertProjectContext(context);
         const sync = syncCadImportedPoints('nanoCAD:ModelStudio', imported.points, overwriteImportedNumbers);
         setOverwriteImportedNumbers(false);
         const missingParameters = imported.diagnostics?.missingNumberParameter ?? 0;
         setNanoCadStatus(`Импорт Model Studio${imported.diagnostics?.reusedScan ? ' из скана' : ''}: добавлено ${sync.added.length}, перемещено ${sync.moved.length}, привязано ${sync.linked.length}, номеров обновлено ${sync.renumbered.length}, без изменений ${sync.unchanged}${missingParameters ? `; у ${missingParameters} объектов нет выбранного параметра номера` : ''}. Группы существующих точек сохранены.`);
         setProjectStatus(`Импорт Model Studio: +${sync.added.length}, перемещено ${sync.moved.length}, привязано ${sync.linked.length}`);
-        requestAnimationFrame(() => zoomExtents(canvasWidth, canvasHeight));
+        requestAnimationFrame(() => { if (isProjectSession(context)) zoomExtents(canvasWidth, canvasHeight); });
         return;
       }
 
@@ -1218,9 +1232,10 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
         baseY,
         tolerance: 1
       });
+      assertProjectContext(context);
       const sync = syncCadImportedPoints(`nanoCAD:${nanoCadSelectedBlock}`, points, overwriteImportedNumbers);
       setOverwriteImportedNumbers(false);
-      requestAnimationFrame(() => zoomExtents(canvasWidth, canvasHeight));
+      requestAnimationFrame(() => { if (isProjectSession(context)) zoomExtents(canvasWidth, canvasHeight); });
       setNanoCadStatus(`Блоки${nanoCadBlockScanId ? ' из скана' : ''}: добавлено ${sync.added.length}, перемещено ${sync.moved.length}, привязано ${sync.linked.length}, номеров обновлено ${sync.renumbered.length}, без изменений ${sync.unchanged}. Атрибут номера: ${nanoCadNumberAttribute || 'не задан'}.`);
       setProjectStatus(`Импорт из nanoCAD: ${nanoCadSelectedBlock} · +${sync.added.length}, перемещено ${sync.moved.length}, привязано ${sync.linked.length}`);
     } catch (e) {
@@ -1318,6 +1333,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   };
 
   const saveProjectToLocalFolder = async () => {
+    const context = captureProjectContext();
     try {
       let projectToSave = project;
 
@@ -1334,10 +1350,11 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
 
       const result = await saveLocalProject(projectToSave);
       if (!result.saved) throw new Error('Сохранение проекта не подтверждено.');
-      useProjectStore.getState().markProjectSaved(projectToSave);
-      setProjectLocalFileName(result.fileName, result.name);
+      if (!useProjectStore.getState().completeProjectSave(projectToSave, context.sessionId, result.fileName, result.name)) return;
       recordOperation('local_project_saved', { fileName: result.fileName, name: result.name });
-      setProjectStatus(`Сохранено: ${result.fileName}`);
+      const state = useProjectStore.getState();
+      const changed = captureProjectContext().signature !== state.savedProjectSignature;
+      setProjectStatus(`Сохранено: ${result.fileName}${changed ? '. Более поздние изменения проекта ещё не сохранены.' : ''}`);
       await refreshLocalProjects();
     } catch (e) {
       setProjectStatus(e instanceof Error ? e.message : 'Не удалось сохранить проект');
@@ -1346,8 +1363,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
 
   const openLocal = async (fileName: string) => {
     try {
-      const loaded = await openLocalProject(fileName);
-      openProjectFromFile(loaded, fileName);
+      if (!await openProjectSafely(async () => ({ project: await openLocalProject(fileName), fileName }))) return;
       setProjectStatus(`Открыт проект: ${fileName}`);
     } catch (e) {
       setProjectStatus(e instanceof Error ? e.message : 'Не удалось открыть проект');
@@ -1369,9 +1385,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     if (!file) return;
 
     try {
-      const text = await file.text();
-      const parsed = JSON.parse(text) as PileProject;
-      openProjectFromFile(parsed, file.name);
+      if (!await openProjectSafely(async () => ({ project: JSON.parse(await file.text()) as PileProject, fileName: file.name }))) return;
       setProjectStatus(`Открыт файл: ${file.name}`);
     } catch (error) {
       setProjectStatus(error instanceof Error ? error.message : 'Не удалось открыть файл проекта');
@@ -1389,11 +1403,13 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
       return;
     }
     try {
-      const result = await desktopApi.openProjectJson();
-      if (result?.canceled) return;
-      if (!result?.opened || !result.fileName || !result.content) throw new Error(result?.error || 'Не удалось открыть файл проекта.');
-      openProjectFromFile(JSON.parse(result.content) as PileProject, result.fileName);
-      setProjectStatus(`Открыт проект: ${result.path || result.fileName}`);
+      if (!await openProjectSafely(async () => {
+        const result = await desktopApi.openProjectJson!();
+        if (result?.canceled) return null;
+        if (!result?.opened || !result.fileName || !result.content) throw new Error(result?.error || 'Не удалось открыть файл проекта.');
+        return { project: JSON.parse(result.content) as PileProject, fileName: result.fileName };
+      })) return;
+      setProjectStatus('Проект открыт.');
     } catch (error) {
       setProjectStatus(error instanceof Error ? error.message : 'Не удалось открыть файл проекта.');
     }
@@ -1446,8 +1462,17 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     cancelManualLinkClearMode();
   };
   const applyClearLinks = () => {
+    const state = useProjectStore.getState();
+    const group = state.project.groups.find(group => group.id === state.selectedGroupId) ?? state.project.groups[0];
+    if (group?.locked) { setProjectStatus('Группа заблокирована. Ручные связи сохранены.'); return; }
     clearSelectedNumberingManualLinks();
     setClearLinksPanelOpen(false);
+  };
+
+  const runNumbering = async (all: boolean) => {
+    try {
+      await (all ? applyRowsNumberingAll() : applyRowsNumbering());
+    } catch (error) { setProjectStatus(error instanceof Error ? error.message : String(error)); }
   };
 
   const toggleNumberingAnimation = () => {
@@ -1671,8 +1696,8 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
               <div className="ribbon-command-subgroup ribbon-command-subgroup-apply">
                 <div className="ribbon-subtitle">Применить</div>
                 <div className="ribbon-subcommands">
-                  <CommandButton icon="№" label="Нумеровать группу" tooltip={'Нумеровать группу\nПрименяет выбранный метод нумерации только к активной группе и показывает весь её путь.'} onClick={() => void applyRowsNumbering()} />
-                  <CommandButton icon="№" label="Нумеровать все" tooltip={'Нумеровать все группы\nНумерует все группы по порядку диспетчера и показывает все маршруты.'} onClick={() => void applyRowsNumberingAll()} />
+                  <CommandButton icon="№" label="Нумеровать группу" tooltip={'Нумеровать группу\nПрименяет выбранный метод нумерации только к активной группе и показывает весь её путь.'} onClick={() => void runNumbering(false)} />
+                  <CommandButton icon="№" label="Нумеровать все" tooltip={'Нумеровать все группы\nНумерует все группы по порядку диспетчера и показывает все маршруты.'} onClick={() => void runNumbering(true)} />
                 </div>
               </div>
             </div>

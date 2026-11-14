@@ -1,5 +1,13 @@
 # Нумератор свайного поля
 
+## Скачать Windows-версию
+
+[Последний релиз](https://github.com/wladsergeew013-glitch/Numerator_svai/releases/latest) · [Изменения v0.3.1](CHANGELOG.md) · [Статус исправлений по ревью](docs/REVIEW_FIXES_RU.md)
+
+Скачайте `PileNumbering-v0.3.1-windows-x64.zip` из релиза, распакуйте в доступную для записи папку и запустите `PileNumbering.exe`. Нужны Windows x64 и Microsoft Edge WebView2 Runtime. Python и Node.js для готового EXE не требуются. Проекты, настройки и журналы сохраняются рядом с EXE; первый запуск распаковывает встроенные зависимости.
+
+Перед обновлением закройте старое окно приложения и сохраните свои проекты. Замените EXE и иконку, сохранив папки `projects`, `config`, `data` и `autosaves`. Контрольные суммы файлов опубликованы в `SHA256SUMS.txt` релиза.
+
 Иллюстрированное руководство пользователя описывает импорт из Excel и nanoCAD, работу с группами, нумерацию, проверку и запись номеров в DWG. 17 страниц и 27 снимков интерфейса. [PDF](docs/PileNumbering_User_Guide_RU.pdf) · [Word](docs/PileNumbering_User_Guide_RU.docx)
 
 ## Исправления обмена и авторазбивки, сентябрь 2026
@@ -42,6 +50,7 @@ npm --prefix frontend run build
 backend/.venv/Scripts/python.exe -m unittest discover -s tests -v
 node tools/checks/transfer_regression_check.cjs
 node tools/checks/cad_scan_workflow_check.cjs
+node tools/checks/project_session_check.cjs
 # Необязательный аргумент: путь к реальному .pilenum.json для проверки масштаба и сохранности точек.
 node tools/checks/transfer_regression_check.cjs "path/to/field.pilenum.json"
 backend/.venv/Scripts/python.exe tools/checks/frontend_contract_check.py

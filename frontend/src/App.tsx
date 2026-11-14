@@ -11,6 +11,8 @@ import { StatusBar } from './components/StatusBar';
 import { StartupScreen } from './components/StartupScreen';
 import { Toolbar } from './components/Toolbar';
 import { useProjectStore } from './store/useProjectStore';
+import { assertProjectContext, captureProjectContext, isProjectSession } from './utils/projectSession';
+import { workspaceKeyboardBlocked } from './utils/workspaceKeyboard';
 import './styles.css';
 
 const DEFAULT_TOOLBAR_HEIGHT = 150;
@@ -166,10 +168,6 @@ export default function App() {
   }, [autosaveSettings.enabled, autosaveSettings.folderPath, autosaveSettings.intervalMinutes]);
 
   useEffect(() => {
-    const isInputTarget = (target: EventTarget | null) => {
-      if (!(target instanceof HTMLElement)) return false;
-      return Boolean(target.closest('input, textarea, select, [contenteditable="true"]'));
-    };
 
     const consume = (event: KeyboardEvent) => {
       event.preventDefault();
@@ -178,7 +176,7 @@ export default function App() {
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (isInputTarget(event.target)) return;
+      if (workspaceKeyboardBlocked(event)) return;
       if (vectorPathDrawMode || vectorPathEditMode) return;
 
       const key = event.key.toLowerCase();
@@ -273,11 +271,13 @@ export default function App() {
   const canvasHeight = Math.max(300, size.h - toolbarHeight - STATUS_BAR_HEIGHT);
 
   const handleCsvImport = useCallback(async (file: File) => {
+    const context = captureProjectContext();
     try {
       setError(null);
       const points = await importCsv(file);
+      assertProjectContext(context);
       appendImportedPoints(file.name, points);
-      requestAnimationFrame(() => zoomExtents(canvasWidth, canvasHeight));
+      requestAnimationFrame(() => { if (isProjectSession(context)) zoomExtents(canvasWidth, canvasHeight); });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Ошибка импорта CSV');
     }

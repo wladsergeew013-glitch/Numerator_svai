@@ -29,7 +29,7 @@ class Window:
 class DesktopLifecycleTest(unittest.TestCase):
     def test_project_dialog_starts_beside_exe_and_remembers_folder_for_session(self):
         with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
+            root = Path(folder).resolve()
             projects = root / 'projects'
             projects.mkdir()
             first = projects / 'one.pilenum.json'
@@ -61,6 +61,32 @@ class DesktopLifecycleTest(unittest.TestCase):
                 launcher._ensure_same_project_before_replace(path, json.dumps({'project': {'id': 'other'}}))
             self.assertEqual(json.loads(path.read_text(encoding='utf-8'))['project']['id'], 'original')
             launcher._ensure_same_project_before_replace(path, json.dumps({'project': {'id': 'original'}}))
+
+    def test_native_save_uses_the_same_ownership_lock_as_the_api(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from app.project_files import atomic_write_project, project_file_lock
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            path = root / 'field.pilenum.json'
+            dialog_ready = threading.Event()
+            window = MagicMock()
+            def choose_file(*args, **kwargs):
+                dialog_ready.set()
+                return (str(path),)
+            window.create_file_dialog.side_effect = choose_file
+            webview = SimpleNamespace(FileDialog=SimpleNamespace(SAVE=20), windows=[window])
+            with patch.object(launcher, 'APP_DIR', root), patch.dict('sys.modules', {'webview': webview}):
+                api = launcher.DesktopApi()
+                api._window = window
+                with ThreadPoolExecutor(1) as pool:
+                    with project_file_lock(path):
+                        future = pool.submit(api.saveProjectJson, path.name, '{"project":{"id":"other"}}')
+                        self.assertTrue(dialog_ready.wait(5))
+                        atomic_write_project(path, '{"project":{"id":"owner"}}')
+                    result = future.result(timeout=5)
+                self.assertFalse(result['saved'])
+                self.assertIn('другому проекту', result['error'])
+                self.assertEqual(json.loads(path.read_text())['project']['id'], 'owner')
     def test_start_does_not_wait_for_window_before_gui_loop(self):
         webview = MagicMock()
         with patch.dict('sys.modules', {'webview': webview}), \

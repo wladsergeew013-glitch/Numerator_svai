@@ -1,0 +1,56 @@
+name: Project checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Python dependencies
+        run: python -m pip install -r backend/requirements.txt pywebview==6.2.1
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Build production frontend
+        run: npm run build --prefix frontend
+      - name: Python tests
+        run: python -m unittest discover -s tests -v
+      - name: Frontend and desktop checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/checks/production_api_check.cjs
+          node tools/checks/desktop_startup_check.cjs
+          node tools/checks/cad_scan_workflow_check.cjs
+          node tools/checks/transfer_regression_check.cjs
+          node tools/checks/project_session_check.cjs
+          node tools/checks/operation_log_check.cjs
+          python tools/checks/frontend_contract_check.py
+          python tools/checks/locked_state_contract_check.py

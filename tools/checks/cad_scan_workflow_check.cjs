@@ -39,7 +39,8 @@ function load(file) {
     if (name === 'react') return react;
     if (name === 'react/jsx-runtime') return {jsx, jsxs:jsx, Fragment:Symbol.for('fragment')};
     if (name.endsWith('/api/client')) return api;
-    if (name.endsWith('/store/useProjectStore')) return {useProjectStore:() => store};
+    if (name.endsWith('.json')) return original(name);
+    if (name.endsWith('/store/useProjectStore')) return {useProjectStore:Object.assign(() => store, {getState:() => store})};
     if (name.startsWith('./') && file.endsWith('Toolbar.tsx')) return new Proxy({}, {get:(_, key) => key === '__esModule' ? true : () => null});
     if (name.startsWith('.')) {
       const base = path.resolve(path.dirname(file), name);
@@ -54,7 +55,7 @@ function load(file) {
 global.window = {innerWidth:1500, innerHeight:950, localStorage:{getItem:() => null, setItem() {}}, setTimeout, clearTimeout};
 global.requestAnimationFrame = fn => fn();
 const {createEmptyProject} = load(path.join(root,'frontend/src/types/project.ts'));
-store = new Proxy({project:createEmptyProject(), selectedPointIds:[], manualLinkClearSelection:[],
+store = new Proxy({project:createEmptyProject(), projectSessionId:'test-session', selectedPointIds:[], manualLinkClearSelection:[],
   numberingPreview:{visible:false}, syncCadImportedPoints:() => ({added:[], moved:[], linked:[], renumbered:[], unchanged:0})},
   {get:(target,key) => key in target ? target[key] : () => {}});
 const {Toolbar} = load(path.join(root,'frontend/src/components/Toolbar.tsx'));

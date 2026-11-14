@@ -269,6 +269,9 @@ async function checkAsyncFileInputs() {
   let opened = 0, imported = 0, previewed = 0;
   const deps = {
     openProjectFromFile: () => { opened++; }, onCsvImport: async () => { imported++; },
+    captureProjectContext: () => ({}), assertProjectContext: () => {},
+    importPreviewContext: {current:null},
+    openProjectSafely: async load => { await load(); opened++; return true; },
     buildImportPreview: async () => ({columns:['X','Y'], rows:[]}), guessColumnIndex: () => 0,
     setImportPreview: () => { previewed++; }, setImportXColumn: () => {}, setImportYColumn: () => {},
     setImportNumberColumn: () => {}, setImportStatus: () => {}, setProjectStatus: () => {}, setFileImportProgress: () => {}
@@ -288,4 +291,125 @@ async function checkAsyncFileInputs() {
   assert.equal(opened, 1); assert.equal(imported, 1); assert.equal(previewed, 1);
   console.log('PASS: project, CSV and Excel input cleanup after asynchronous reading.');
 }
-checkAsyncFileInputs().catch(error => { console.error(error); process.exitCode = 1; });
+async function checkPinnedNumbering() {
+  const {buildPreviewOrderForGroup} = load(path.join(root,'frontend/src/store/useProjectStore.ts'));
+  const group = (id, order, pipelineId, extra={}) => ({id,name:id,order,pipelineId,color:'#ff0000',visible:true,locked:false,
+    numbering:{...defaultNumberingSettings(),method:'rows',rowTolerance:0.1,columnTolerance:0.1},...extra});
+  const prepare = project => {store.getState().setProject(structuredClone(project));store.getState().setSelectedGroup(project.groups[0]?.id ?? null);};
+  let cases=0;
+  for(const method of ['rows','columns','route','vector']) for(const cluster of [false,true])
+    for(const mode of ['global_sequential','per_group']) for(const kind of ['locked','manual'])
+      for(const position of [0,1,2]) for(const command of ['applyRowsNumbering','applyRowsNumberingAll']) {
+        const p=createEmptyProject();p.numberingMode=mode;
+        const g=group('g',1,p.pipelines[0].id,{meta:cluster?{clusterNumbering:true,clusterPrefix:2}:{}});
+        g.numbering={...g.numbering,method,startPointId:'p0',vectorPath:[{x:0,y:0},{x:20,y:20}]};p.groups=[g];
+        p.points=[0,1,2].map(i=>point('p'+i,i*10,i*10,{groupId:'g'}));
+        const pinned=p.points[position];pinned.locked=kind==='locked';pinned.manualNumber=kind==='manual';
+        pinned.number=cluster?(kind==='manual'?22:10):1;
+        if(cluster&&kind==='manual')pinned.meta={clusterPrefix:2,clusterLocalNumber:2};
+        prepare(p);await store.getState()[command]();
+        const first=structuredClone(store.getState().project.points);
+        assert.deepEqual(first.find(point=>point.id===pinned.id),pinned,`${method}: preserve ${kind} final number`);
+        assert.equal(new Set(first.map(point=>point.number)).size,3,`${method}: do not reuse a pinned number`);
+        await store.getState()[command]();assert.deepEqual(store.getState().project.points,first,`${method}: idempotent numbering`);
+        cases++;
+      }
+  const clustered=createEmptyProject();const pid=clustered.pipelines[0].id;
+  clustered.groups=[group('g',1,pid,{meta:{clusterNumbering:true,clusterPrefix:2}})];
+  clustered.points=[0,1,2].map(i=>point('p'+i,i*10,0,{groupId:'g'}));
+  prepare(clustered);await store.getState().applyRowsNumbering();
+  store.getState().setPointManualNumber('p1',22);await store.getState().applyRowsNumbering();
+  assert.deepEqual(store.getState().project.points.map(p=>p.number),[21,22,23]);
+  store.getState().setPointManualNumber('p1',999);await store.getState().applyRowsNumbering();
+  assert.deepEqual(store.getState().project.points.map(p=>p.number),[21,999,23],'arbitrary manual final numbers do not become local counters');
+
+  const pipeline=createEmptyProject();const main=pipeline.pipelines[0].id;
+  pipeline.groups=[group('a',1,main),group('b',2,main,{locked:true})];
+  pipeline.points=[point('a',0,0,{groupId:'a',number:1}),point('new',10,0,{groupId:'a'}),point('b',20,0,{groupId:'b',number:2})];
+  prepare(pipeline);await store.getState().applyRowsNumberingAll();
+  assert.deepEqual(store.getState().project.points.map(p=>p.number),[1,3,2]);
+  pipeline.groups[0].meta={clusterNumbering:true,clusterPrefix:9};pipeline.groups[1].locked=false;
+  pipeline.points=[point('a',0,0,{groupId:'a'}),point('b',10,0,{groupId:'b'})];
+  prepare(pipeline);await store.getState().applyRowsNumberingAll();
+  const beforeLock=store.getState().project.points.map(p=>p.number);
+  store.getState().toggleGroupLocked('a');await store.getState().applyRowsNumberingAll();
+  assert.deepEqual(store.getState().project.points.map(p=>p.number),beforeLock,'locking a cluster does not advance the ordinary counter');
+
+  const perGroup=createEmptyProject();perGroup.numberingMode='per_group';
+  perGroup.groups=[group('a',1,perGroup.pipelines[0].id),group('b',2,perGroup.pipelines[0].id)];
+  perGroup.points=[point('a',100,0,{groupId:'a'}),point('b1',0,0,{groupId:'b'}),point('b2',90,0,{groupId:'b'})];
+  prepare(perGroup);store.getState().setSelectedGroup('b');await store.getState().applyRowsNumbering();
+  const single=store.getState().project.points.filter(p=>p.groupId==='b');
+  prepare(perGroup);store.getState().setSelectedGroup('b');await store.getState().applyRowsNumberingAll();
+  assert.deepEqual(store.getState().project.points.filter(p=>p.groupId==='b'),single);
+  assert.equal(buildPreviewOrderForGroup(perGroup,perGroup.groups[1]).route[0].id,'b1');
+  assert.equal(buildGroupFlow(perGroup).endpoints.find(item=>item.groupId==='b').start.id,'b1');
+
+  const locked=structuredClone(perGroup);locked.groups[0].locked=true;locked.groups[0].numbering.startPointId='a';
+  prepare(locked);const before=structuredClone(store.getState().project);
+  store.getState().copyGroupPropertyToTargets('b1',['a']);assert.deepEqual(store.getState().project,before);
+  store.getState().copyGroupPropertyToTargets('a',['b1']);assert.deepEqual(store.getState().project,before);
+  locked.groups[0].locked=false;locked.points[0].locked=true;prepare(locked);
+  store.getState().copyGroupPropertyToTargets('b1',['a']);assert.equal(store.getState().project.points[0].groupId,'a');
+  store.getState().assignPointIdsToGroup(['a'],'b');assert.equal(store.getState().project.points[0].groupId,'a');
+
+  for(const method of ['rows','columns','route','vector']) {
+    const p=createEmptyProject();p.groups=[group('g',1,p.pipelines[0].id)];
+    p.groups[0].numbering={...p.groups[0].numbering,method,startPointId:'a',endPointId:'d',manualLinks:[{fromId:'a',toId:'d'}]};
+    p.points=['a','b','c','d'].map((id,i)=>point(id,i*10,0,{groupId:'g'}));
+    const route=buildNumberingOrder(p.points,p.groups[0].numbering);
+    assert.equal(route.at(-1).id,'d');assert.equal(new Set(route.map(p=>p.id)).size,4);
+    p.groups[0].numbering.manualLinks=[];prepare(p);
+    store.getState().startNumberingManualLinkEdit('a','b');store.getState().handleNumberingPickPoint('d');
+    assert.deepEqual(store.getState().project.groups[0].numbering.manualLinks,[],'reject a premature edge to the pinned finish');
+  }
+  const empty=structuredClone(perGroup);empty.groups.unshift(group('empty',0,empty.pipelines[0].id));
+  prepare(empty);const pointsBefore=structuredClone(store.getState().project.points);await store.getState().applyRowsNumbering();
+  assert.deepEqual(store.getState().project.points,pointsBefore,'an explicitly selected empty group does not number its neighbour');
+  const continuity=structuredClone(perGroup);continuity.numberingMode='global_sequential';
+  prepare(continuity);store.getState().setSelectedGroup('b');
+  store.getState().startNumberingManualLinkEdit('b2','b1');store.getState().handleNumberingPickPoint('b1');
+  assert.deepEqual(store.getState().project.groups[1].numbering.manualLinks,[{fromId:'b2',toId:'b1'}]);
+  prepare(continuity);store.getState().setSelectedGroup('b');
+  store.getState().startNumberingManualLinkEdit('b1','b2');store.getState().handleNumberingPickPoint('b2');
+  assert.deepEqual(store.getState().project.groups[1].numbering.manualLinks,[],'link validation uses the same continuity as preview');
+
+  const cacheProject=createEmptyProject();const cachePid=cacheProject.pipelines[0].id;
+  cacheProject.groups=[group('g',1,cachePid),group('other',2,cachePid)];
+  cacheProject.points=grid.slice(0,4).map((p,i)=>({...p,id:'cache'+i,groupId:'g'}));
+  prepare(cacheProject);store.getState().buildNumberingPreview();
+  store.setState({numberingPreview:{...store.getState().numberingPreview,visible:false}});
+  store.getState().updateGroupNumbering('g',{method:'columns'});
+  store.getState().setNumberingPreviewMode('full');
+  let current=store.getState();
+  assert.deepEqual(current.numberingPreview.routePointIds,buildPreviewOrderForGroup(current.project,current.project.groups[0]).route.map(p=>p.id));
+  store.getState().assignPointIdsToGroup(['cache1'],'other');
+  assert.ok(!store.getState().numberingPreview.routePointIds.includes('cache1'),'route cache cannot retain a point from another group');
+  store.getState().undo();assert.equal(store.getState().numberingPreview.routePointIds.length,4);
+  store.getState().setPoints(store.getState().project.points.map(p=>p.id==='cache0'?{...p,x:1000}:p));
+  current=store.getState();
+  assert.deepEqual(current.numberingPreview.routePointIds,buildPreviewOrderForGroup(current.project,current.project.groups[0]).route.map(p=>p.id));
+
+  const cross=structuredClone(perGroup);cross.pipelines.push({id:'other-pipeline',name:'Other',order:2});cross.groups[1].pipelineId='other-pipeline';
+  cross.points.push(point('stay',2,0,{groupId:'a'}));prepare(cross);
+  store.getState().copyGroupPropertyToTargets('b1',['a']);
+  assert.equal(store.getState().selectedGroupId,'b');assert.equal(store.getState().selectedPipelineId,'other-pipeline');
+  await store.getState().applyRowsNumbering();assert.equal(store.getState().project.points.find(p=>p.id==='stay').number,null);
+  await store.getState().applyRowsNumberingAll();
+  assert.equal(store.getState().project.points.find(p=>p.id==='stay').number,1);
+  assert.equal(store.getState().project.points.find(p=>p.id==='b1').number,1,'independent pipelines may use the same number');
+
+  const lockedLinks=structuredClone(cacheProject);lockedLinks.groups[0].numbering.manualLinks=[{fromId:'cache0',toId:'cache1'}];
+  prepare(lockedLinks);store.getState().startManualLinkClearMode();store.getState().toggleGroupLocked('g');
+  const operations=store.getState().project.operations.length;store.getState().clearSelectedNumberingManualLinks();
+  assert.equal(store.getState().project.operations.length,operations,'a rejected locked operation does not report success');
+  assert.deepEqual(store.getState().project.groups[0].numbering.manualLinks,lockedLinks.groups[0].numbering.manualLinks);
+
+  const overflow=structuredClone(perGroup);overflow.groups[1].numbering.startNumber=Number.MAX_SAFE_INTEGER;
+  prepare(overflow);store.getState().setSelectedGroup('b');const originalPoints=structuredClone(store.getState().project.points);
+  await assert.rejects(store.getState().applyRowsNumbering(),/точность/);
+  assert.deepEqual(store.getState().project.points,originalPoints);assert.equal(store.getState().history.length,0);
+  console.log(`PASS: ${cases} pinned-number cases (two runs each), cluster manual numbers, pipeline reservations, per-group consistency, membership locks and fixed finishes.`);
+  console.log('PASS: continuity-aware links, route invalidation after edits/Undo, cross-pipeline group selection, lock rejection and atomic overflow rejection.');
+}
+checkAsyncFileInputs().then(checkPinnedNumbering).catch(error => { console.error(error); process.exitCode = 1; });
