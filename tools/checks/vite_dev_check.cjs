@@ -31,9 +31,11 @@ const root=path.resolve(__dirname,'../..');
     for(const route of ['/.env.review?raw','/.env.review::$DATA?raw','/.env.review:$DATA?raw',fsRoute]) {
       const response=await fetch(base+route),body=await response.text();
       assert.ok(!body.includes(marker),`${route} must never disclose the fixture`);
-      // :$DATA is an absent named stream, rather than the default ::$DATA.
-      // Vite may serve its ordinary SPA fallback when that stream is absent.
-      if (route.includes('.review:$DATA')) {
+      // :$DATA is an absent named stream. An unresolved /@fs/ URL (including
+      // cross-drive runner paths) can also reach Vite's ordinary SPA fallback.
+      // A 200 is acceptable only for our exact harmless HTML control, never
+      // for source-file content. The direct shared guard is checked below.
+      if (route.includes('.review:$DATA') || route.startsWith('/@fs/')) {
         assert.ok(response.status>=400 || (response.status===200 && body.includes('pile-dev-control')));
       } else assert.ok(response.status>=400,`${route} must be denied`);
     }
