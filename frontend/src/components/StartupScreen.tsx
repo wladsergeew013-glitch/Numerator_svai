@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import { listLocalProjects, listRecentProjects, openLocalProject, openLocalProjectLocation, openRecentProject } from '../api/client';
 import { useProjectStore } from '../store/useProjectStore';
+import { APP_VERSION } from '../version';
+import { openProjectSafely, runProjectTransition } from '../utils/projectSession';
 import type { LocalProjectInfo, PileProject, RecentProjectInfo } from '../types/project';
 
 interface DesktopProjectBridge {
@@ -36,7 +38,6 @@ export function StartupScreen({ onReady }: { onReady: () => void }) {
   const [newName, setNewName] = useState('Новый проект');
   const [creating, setCreating] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
-  const openProjectFromFile = useProjectStore(state => state.openProjectFromFile);
   const createNewProject = useProjectStore(state => state.createNewProject);
 
   const refresh = async () => {
@@ -59,9 +60,7 @@ export function StartupScreen({ onReady }: { onReady: () => void }) {
     setBusy(key);
     setError('');
     try {
-      const project = await load();
-      openProjectFromFile(project, fileName);
-      onReady();
+      if (await openProjectSafely(async () => ({ project: await load(), fileName }))) onReady();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось открыть проект.');
     } finally { setBusy(''); }
@@ -73,33 +72,36 @@ export function StartupScreen({ onReady }: { onReady: () => void }) {
     setError('');
     setBusy('file');
     try {
-      const result = await bridge.openProjectJson();
-      if (result.canceled) return;
-      if (!result.opened || !result.fileName || !result.content) throw new Error(result.error || 'Не удалось открыть файл проекта.');
-      openProjectFromFile(JSON.parse(result.content) as PileProject, result.fileName);
-      onReady();
+      const opened = await openProjectSafely(async () => {
+        const result = await bridge.openProjectJson!();
+        if (result.canceled) return null;
+        if (!result.opened || !result.fileName || !result.content) throw new Error(result.error || 'Не удалось открыть файл проекта.');
+        return { project: JSON.parse(result.content) as PileProject, fileName: result.fileName };
+      });
+      if (opened) onReady();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось открыть файл проекта.');
     } finally { setBusy(''); }
   };
 
   const openBrowserFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.currentTarget.files?.[0];
+    const input = event.currentTarget;
+    const file = input.files?.[0];
     if (!file) return;
     try {
-      openProjectFromFile(JSON.parse(await file.text()) as PileProject, file.name);
-      onReady();
+      if (await openProjectSafely(async () => ({ project: JSON.parse(await file.text()) as PileProject, fileName: file.name }))) onReady();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось открыть файл проекта.');
-    } finally { event.currentTarget.value = ''; }
+    } finally { input.value = ''; }
   };
 
-  const create = (event: FormEvent) => {
+  const create = async (event: FormEvent) => {
     event.preventDefault();
     const name = newName.trim();
     if (!name) { setError('Укажите имя нового проекта.'); return; }
-    createNewProject(name);
-    onReady();
+    try {
+      if (await runProjectTransition(async () => name, createNewProject)) onReady();
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
   };
 
   const filteredProjects = projects.filter(item =>
@@ -110,7 +112,7 @@ export function StartupScreen({ onReady }: { onReady: () => void }) {
       <header className="startup-header">
         <div className="startup-brand-mark" aria-hidden="true"><span>＋</span><span>＋</span><span>＋</span><span>＋</span></div>
         <div>
-          <p className="startup-eyebrow">PILE NUMBERING · 0.3.0</p>
+          <p className="startup-eyebrow">PILE NUMBERING · {APP_VERSION}</p>
           <h1>Нумератор свайного поля</h1>
           <p className="startup-subtitle">Выберите проект для работы или создайте новый.</p>
         </div>

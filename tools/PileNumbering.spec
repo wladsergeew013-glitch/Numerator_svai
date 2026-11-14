@@ -1,8 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+import json
+import runpy
 ROOT = Path(SPECPATH).resolve().parent
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.win32.versioninfo import VSVersionInfo, FixedFileInfo, StringFileInfo, StringTable, StringStruct, VarFileInfo, VarStruct
+
+APP_VERSION = runpy.run_path(str(ROOT / 'backend' / 'app' / 'version.py'))['APP_VERSION']
+if json.loads((ROOT / 'frontend' / 'package.json').read_text(encoding='utf-8'))['version'] != APP_VERSION:
+    raise SystemExit('Frontend and backend release versions must match.')
+version_tuple = tuple(int(part) for part in APP_VERSION.split('.')) + (0,)
+version_info = VSVersionInfo(
+    ffi=FixedFileInfo(filevers=version_tuple, prodvers=version_tuple, mask=0x3f, flags=0, OS=0x40004, fileType=1, subtype=0, date=(0, 0)),
+    kids=[StringFileInfo([StringTable('040904B0', [
+        StringStruct('FileDescription', 'Нумератор свайного поля'),
+        StringStruct('FileVersion', APP_VERSION), StringStruct('ProductVersion', APP_VERSION),
+        StringStruct('ProductName', 'PileNumbering'), StringStruct('OriginalFilename', 'PileNumbering.exe')
+    ])]), VarFileInfo([VarStruct('Translation', [1033, 1200])])]
+)
 
 datas = [(str(ROOT / 'frontend' / 'dist'), 'frontend_dist')]
 sdk_bridge = ROOT / 'cad_bridge' / 'bin' / 'nanoCAD26' / 'PileNumbering.Sdk26.nrx'
@@ -49,6 +65,7 @@ exe = EXE(
     a.datas,
     [],
     name='PileNumbering',
+    version=version_info,
     icon=str(ROOT / 'config' / 'app_icon.ico') if (ROOT / 'config' / 'app_icon.ico').exists() else str(ROOT / 'tools' / 'app_icon.ico'),
     debug=False,
     bootloader_ignore_signals=False,

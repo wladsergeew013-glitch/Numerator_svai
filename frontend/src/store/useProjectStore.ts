@@ -74,6 +74,17 @@ function groupPointCount(points: PilePoint[], groupId: string) {
   return points.filter((point) => point.groupId === groupId).length;
 }
 
+function editableMembershipTargets(project: PileProject, ids: string[], targetGroupId: string | null) {
+  const target = targetGroupId ? project.groups.find(group => group.id === targetGroupId) : null;
+  if (targetGroupId && (!target || target.locked)) return [];
+  const lockedGroups = new Set(project.groups.filter(group => group.locked).map(group => group.id));
+  const byId = new Map(project.points.map(point => [point.id, point]));
+  return Array.from(new Set(ids)).filter(id => {
+    const point = byId.get(id);
+    return point && !point.locked && (!point.groupId || !lockedGroups.has(point.groupId));
+  });
+}
+
 
 const DEFAULT_PIPELINE_ID = 'pipeline-main';
 
@@ -206,6 +217,7 @@ function resolveEffectiveGroupNumberingContext(project: PileProject, targetGroup
   let currentStart = pipelineStartNumber(project, pipelineId);
   let previousEndPoint: PilePoint | null = null;
   let simulatedPoints = project.points;
+  const reserved = numberingReservations(project, targetGroup);
 
   for (const group of pipelineGroups) {
     const groupPoints = simulatedPoints.filter((point) => point.groupId === group.id);
@@ -226,7 +238,7 @@ function resolveEffectiveGroupNumberingContext(project: PileProject, targetGroup
       continue;
     }
 
-    const result = applyNumberingToGroup(simulatedPoints, group, currentStart, continuityAnchor);
+    const result = applyNumberingToGroup(simulatedPoints, group, currentStart, continuityAnchor, reserved);
     simulatedPoints = result.points;
     currentStart = result.nextNumber;
     previousEndPoint = result.route[result.route.length - 1] ?? previousEndPoint;
@@ -239,6 +251,9 @@ function resolveEffectiveGroupNumberingContext(project: PileProject, targetGroup
 }
 
 export function buildPreviewOrderForGroup(project: PileProject, targetGroup: PileGroup) {
+  if (project.numberingMode !== 'global_sequential') {
+    return buildOrderWithContinuity(project.points.filter(point => point.groupId === targetGroup.id), targetGroup.numbering);
+  }
   const pipelineId = groupPipelineId(targetGroup, project);
   const groups = sortedGroupsForPipeline(project, pipelineId);
   let previousEndPoint: PilePoint | null = null;
@@ -297,7 +312,7 @@ function findFirstNonEmptyGroup(project: PileProject, preferredGroupId?: string 
   const pipelineId = preferredPipelineId ?? (preferredGroup ? groupPipelineId(preferredGroup, project) : defaultPipelineId(project));
   const groups = sortedGroupsForPipeline(project, pipelineId);
   const preferred = preferredGroupId ? groups.find((group) => group.id === preferredGroupId) : null;
-  if (preferred && groupPointCount(project.points, preferred.id) > 0) return preferred;
+  if (preferred) return preferred;
   return groups.find((group) => groupPointCount(project.points, group.id) > 0) ?? preferred ?? groups[0] ?? firstGroupInPipeline(project, defaultPipelineId(project));
 }
 
@@ -1022,7 +1037,8 @@ function applyManualLinksToRoute(route: PilePoint[], links: NumberingManualLink[
     used.add(current.id);
 
     const manualNextId = linkMap.get(current.id);
-    if (manualNextId && byId.has(manualNextId) && !used.has(manualNextId)) {
+    if (manualNextId && byId.has(manualNextId) && !used.has(manualNextId)
+      && (manualNextId !== fixedEndId || used.size === route.length - 1)) {
       current = byId.get(manualNextId)!;
       nearestTailMode = true;
       continue;
@@ -1044,7 +1060,7 @@ function applyManualLinksToRoute(route: PilePoint[], links: NumberingManualLink[
     const tailUsed = new Set<string>();
     let anchor = result[result.length - 1];
     while (tailUsed.size < tail.length) {
-      const candidates = tail.filter((p) => !tailUsed.has(p.id) && (!fixedEndId || p.id !== fixedEndId || tail.some((item) => !tailUsed.has(item.id) && item.id !== fixedEndId)));
+      const candidates = tail.filter((p) => !tailUsed.has(p.id) && (!fixedEndId || p.id !== fixedEndId || !tail.some((item) => !tailUsed.has(item.id) && item.id !== fixedEndId)));
       if (candidates.length === 0) break;
       const next = [...candidates].sort((a, b) => {
         const byDistance = pointDistance(anchor, a) - pointDistance(anchor, b);
@@ -1458,20 +1474,43 @@ export function buildNumberingOrder(points: PilePoint[], settings: NumberingSett
   return applyManualLinksToRoute(applyStartEndPreference(route, settings), settings.manualLinks, settings.endPointId);
 }
 
-function numberRouteWithNext(points: PilePoint[], route: PilePoint[], settings: NumberingSettings) {
+function numberRouteWithNext(points: PilePoint[], route: PilePoint[], settings: NumberingSettings, reserved = new Set<number>(), clusterPrefix?: number) {
   let value = settings.startNumber;
+  const step = settings.step;
+  if (!Number.isSafeInteger(value) || !Number.isSafeInteger(step) || step === 0) {
+    throw new Error('Начальный номер и шаг должны быть безопасными целыми числами, шаг не может быть нулём.');
+  }
   const numberById = new Map<string, number>();
+  const localById = new Map<string, number>();
+  const finalNumber = (local: number) => clusterPrefix === undefined ? local : clusterPrefixedNumber(clusterPrefix, local);
   for (const point of route) {
     if (point.manualNumber) {
-      if (typeof point.number === 'number' && Number.isFinite(point.number)) value = point.number + settings.step;
+      if (clusterPrefix !== undefined) {
+        // Manual input is a final number. Only verified saved local metadata
+        // can move the local counter; an arbitrary final value owns one slot.
+        const local = Number(point.meta?.clusterLocalNumber);
+        value = Number.isSafeInteger(local) && point.meta?.clusterPrefix === clusterPrefix
+          && finalNumber(local) === point.number ? local + step : value + step;
+      } else if (typeof point.number === 'number' && Number.isFinite(point.number)) value = point.number + step;
       continue;
     }
     if (point.locked) continue;
-    numberById.set(point.id, value);
-    value += settings.step;
+    while (reserved.has(finalNumber(value))) {
+      value += step;
+      if (!Number.isSafeInteger(value)) throw new Error('Закреплённые номера не оставляют допустимого номера.');
+    }
+    const number = finalNumber(value);
+    if (!Number.isSafeInteger(value) || !Number.isSafeInteger(number)) throw new Error('Итоговый номер превышает точность целого числа.');
+    numberById.set(point.id, number);
+    localById.set(point.id, value);
+    reserved.add(number);
+    value += step;
   }
   return {
-    points: points.map((point) => numberById.has(point.id) ? { ...point, number: numberById.get(point.id) ?? point.number } : point),
+    points: points.map((point) => numberById.has(point.id) ? {
+      ...point, number: numberById.get(point.id)!,
+      ...(clusterPrefix === undefined ? {} : { meta: { ...point.meta, clusterPrefix, clusterLocalNumber: localById.get(point.id)! } })
+    } : point),
     nextNumber: value
   };
 }
@@ -1481,6 +1520,7 @@ function numberRoute(points: PilePoint[], route: PilePoint[], settings: Numberin
 }
 
 function nextNumberAfterLockedGroup(points: PilePoint[], group: PileGroup, currentStart: number) {
+  if (isClusterGroup(group)) return currentStart;
   const step = group.numbering.step || 1;
   const groupNumbers = points
     .filter((point) => point.groupId === group.id && typeof point.number === 'number' && Number.isFinite(point.number))
@@ -1504,7 +1544,16 @@ function clusterPrefixForGroup(group: PileGroup) {
   return Number.isFinite(value) && value > 0 ? value : group.order || 1;
 }
 
-function applyNumberingToGroup(points: PilePoint[], group: PileGroup, startNumber?: number, previousEndPoint?: Pick<PilePoint, 'x' | 'y'> | null) {
+function numberingReservations(project: PileProject, group: PileGroup, preserveOtherGroups = false) {
+  const groupIds = new Set(project.numberingMode === 'global_sequential'
+    ? sortedGroupsForPipeline(project, groupPipelineId(group, project)).map(item => item.id) : [group.id]);
+  const locked = new Set(project.groups.filter(item => item.locked).map(item => item.id));
+  return new Set(project.points.filter(point => point.groupId && groupIds.has(point.groupId)
+    && (point.locked || point.manualNumber || locked.has(point.groupId) || (preserveOtherGroups && point.groupId !== group.id)))
+    .map(point => point.number).filter((number): number is number => typeof number === 'number' && Number.isFinite(number)));
+}
+
+function applyNumberingToGroup(points: PilePoint[], group: PileGroup, startNumber?: number, previousEndPoint?: Pick<PilePoint, 'x' | 'y'> | null, reserved = new Set<number>()) {
   const groupPoints = points.filter((p) => p.groupId === group.id);
   const cluster = isClusterGroup(group);
   const baseSettings = cluster
@@ -1513,21 +1562,11 @@ function applyNumberingToGroup(points: PilePoint[], group: PileGroup, startNumbe
       ? { ...group.numbering, startNumber }
       : group.numbering;
   const { route, settings } = buildOrderWithContinuity(groupPoints, baseSettings, previousEndPoint);
-  const numbered = numberRouteWithNext(points, route, settings);
   const clusterPrefix = clusterPrefixForGroup(group);
-  const finalPoints = cluster
-    ? numbered.points.map((point) => (
-      point.groupId === group.id && !point.manualNumber && typeof point.number === 'number' && Number.isFinite(point.number)
-        ? {
-          ...point,
-          number: clusterPrefixedNumber(clusterPrefix, point.number),
-          meta: { ...(point.meta ?? {}), clusterPrefix, clusterLocalNumber: point.number }
-        }
-        : point
-    ))
-    : numbered.points;
+  for (const point of route) if ((point.locked || point.manualNumber) && typeof point.number === 'number') reserved.add(point.number);
+  const numbered = numberRouteWithNext(points, route, settings, reserved, cluster ? clusterPrefix : undefined);
   return {
-    points: finalPoints,
+    points: numbered.points,
     numberedCount: route.filter((p) => !p.locked && !p.manualNumber).length,
     nextNumber: cluster ? (typeof startNumber === 'number' ? startNumber : group.numbering.startNumber) : numbered.nextNumber,
     routeIds: route.map((p) => p.id),
@@ -1545,9 +1584,11 @@ function isManualLinkTargetAllowed(project: PileProject, group: PileGroup, fromI
 
   const groupPoints = project.points.filter((p) => p.groupId === group.id);
   const linksWithoutCurrentSource = (group.numbering.manualLinks ?? []).filter((link) => link.fromId !== fromId);
-  const route = buildNumberingOrder(groupPoints, { ...group.numbering, manualLinks: linksWithoutCurrentSource });
+  const context = resolveEffectiveGroupNumberingContext(project, group);
+  const { route } = buildOrderWithContinuity(groupPoints, { ...group.numbering, manualLinks: linksWithoutCurrentSource }, context.previousEndPoint);
   const fromIndex = route.findIndex((p) => p.id === fromId);
   const toIndex = route.findIndex((p) => p.id === toId);
+  if (toId === group.numbering.endPointId && fromIndex !== route.length - 2) return false;
 
   // Ручная связь управляет только конечной точкой текущего ребра.
   // Нельзя цепляться назад по уже построенному маршруту — это быстро создаёт петли
@@ -1662,8 +1703,10 @@ export type EditingTool = 'create' | 'move' | 'copy' | 'props' | null;
 export type EditPointPickMode = 'copy_base' | 'copy_target' | 'props_source' | 'props_target' | null;
 
 interface ProjectState {
+  projectSessionId: string;
   savedProjectSignature: string;
-  markProjectSaved: (project?: PileProject) => void;
+  markProjectSaved: (project?: PileProject, sessionId?: string) => boolean;
+  completeProjectSave: (project: PileProject, sessionId: string, fileName: string, name: string) => boolean;
   groupDetailsId: string | null;
   openGroupDetails: (id: string) => void;
   closeGroupDetails: () => void;
@@ -1821,10 +1864,39 @@ interface ProjectState {
 const startupConfig = loadUserConfig();
 const startupProject = applyUserConfigToEmptyProject(createEmptyProject(), startupConfig);
 
+function projectSessionState(project: PileProject) {
+  const selectedGroup = project.groups[0] ?? null;
+  return {
+    project, projectSessionId: crypto.randomUUID(),
+    selectedPointIds: [], selectedGroupId: selectedGroup?.id ?? null,
+    selectedPipelineId: selectedGroup?.pipelineId ?? project.pipelines[0]?.id ?? null,
+    history: [], redoStack: [], journalSnapshots: {}, collapsedGroupIds: [],
+    groupDetailsId: null, allGroupsOrderVisible: false,
+    editingTool: null, editPointPickMode: null, copyBasePoint: null,
+    copyBasePointId: null, propertySourcePointId: null,
+    numberingPreview: EMPTY_NUMBERING_PREVIEW, numberingPickMode: null,
+    numberingLinkFromId: null, numberingLinkToId: null,
+    manualLinkClearMode: false, manualLinkClearSelection: [],
+    groupOutlineDrawMode: false, groupOutlineDraft: [],
+    vectorPathDrawMode: false, vectorPathEditMode: false, vectorPathDraft: [],
+    settingsHoverTarget: null
+  };
+}
+
 export const useProjectStore = create<ProjectState>((set, get) => ({
   project: startupProject,
+  projectSessionId: crypto.randomUUID(),
   savedProjectSignature: projectSaveSignature(startupProject),
-  markProjectSaved: (project) => set({ savedProjectSignature: projectSaveSignature(project ?? get().project) }),
+  markProjectSaved: (project = get().project, sessionId = get().projectSessionId) => {
+    if (get().projectSessionId !== sessionId || get().project.project.id !== project.project.id) return false;
+    set({ savedProjectSignature: projectSaveSignature(project) });
+    return true;
+  },
+  completeProjectSave: (project, sessionId, fileName, name) => {
+    if (!get().markProjectSaved(project, sessionId)) return false;
+    if (get().project.project.name === project.project.name) get().setProjectLocalFileName(fileName, name);
+    return true;
+  },
   groupDetailsId: null,
   openGroupDetails: (id) => { if (!get().project.groups.some(group => group.id === id)) return; get().setSelectedGroup(id); set({ groupDetailsId: id }); },
   closeGroupDetails: () => set({ groupDetailsId: null }),
@@ -1933,8 +2005,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setProject: (project) => {
     const normalized = normalizeProject(project, get().project);
-    const selectedGroup = normalized.groups[0] ?? null;
-    set({ project: normalized, selectedPointIds: [], selectedGroupId: selectedGroup?.id ?? null, selectedPipelineId: selectedGroup?.pipelineId ?? normalized.pipelines[0]?.id ?? null });
+    set({ ...projectSessionState(normalized), savedProjectSignature: projectSaveSignature(normalized) });
     get().recordOperation('project_opened', { name: normalized.project.name, points: normalized.points.length, groups: normalized.groups.length, fileName: normalized.project.fileName ?? null });
   },
 
@@ -1948,15 +2019,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         name: project.project.name && project.project.name !== 'Untitled project' ? project.project.name : fileBaseName(fileName)
       }
     }, get().project);
-    const selectedGroup = normalized.groups[0] ?? null;
-    set({ project: normalized, selectedPointIds: [], selectedGroupId: selectedGroup?.id ?? null, selectedPipelineId: selectedGroup?.pipelineId ?? normalized.pipelines[0]?.id ?? null });
+    set({ ...projectSessionState(normalized), savedProjectSignature: projectSaveSignature(normalized) });
     get().recordOperation('project_opened', { name: normalized.project.name, points: normalized.points.length, groups: normalized.groups.length, fileName });
     get().markProjectSaved();
     set({ groupDetailsId: null, allGroupsOrderVisible: false });
   },
 
   startNewProjectFromImport: (fileName, points) => {
-    get().pushHistory();
     const current = get().project;
     const empty = createEmptyProject();
     const projectName = fileBaseName(fileName);
@@ -1980,13 +2049,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       },
       operations: []
     };
-    set({ project: nextProject, selectedPointIds: [], selectedGroupId: null, selectedPipelineId: nextProject.pipelines[0]?.id ?? null, collapsedGroupIds: [] });
+    set({ ...projectSessionState(nextProject), savedProjectSignature: '' });
     get().recordOperation('csv_imported', { points: points.length, sourceFileName: fileName, name: projectName });
   },
 
 
   createNewProject: (name) => {
-    get().pushHistory();
     const current = get().project;
     const empty = createEmptyProject();
     const cleanName = (name || 'Новый проект').trim() || 'Новый проект';
@@ -2003,7 +2071,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       viewSettings: current.viewSettings,
       operations: []
     };
-    set({ project: nextProject, selectedPointIds: [], selectedGroupId: null, selectedPipelineId: nextProject.pipelines[0]?.id ?? null, collapsedGroupIds: [] });
+    set({ ...projectSessionState(nextProject), savedProjectSignature: '' });
     get().recordOperation('project_created', { name: cleanName });
   },
 
@@ -2444,11 +2512,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const uniqueTargetIds = Array.from(new Set(targetPointIds)).filter((id) => id && id !== sourcePointId);
     if (uniqueTargetIds.length === 0) return;
 
-    const existingTargetIds = new Set(project.points.map((p) => p.id));
-    const targetIds = uniqueTargetIds.filter((id) => existingTargetIds.has(id));
+    const nextGroupId = sourcePoint.groupId ?? null;
+    const targetIds = editableMembershipTargets(project, uniqueTargetIds, nextGroupId);
     if (targetIds.length === 0) return;
 
-    const nextGroupId = sourcePoint.groupId ?? null;
     const targetSet = new Set(targetIds);
 
     get().pushHistory();
@@ -2464,7 +2531,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         })
       },
       selectedPointIds: targetIds,
-      selectedGroupId: nextGroupId ?? state.selectedGroupId
+      selectedGroupId: nextGroupId ?? state.selectedGroupId,
+      selectedPipelineId: nextGroupId
+        ? groupPipelineId(state.project.groups.find(group => group.id === nextGroupId)!, state.project)
+        : state.selectedPipelineId
     }));
     get().recordOperation('point_group_properties_copied', {
       sourcePointId,
@@ -2636,7 +2706,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   startNumberingManualLinkEdit: (fromId, toId = null) => {
-    const { project, selectedGroupId, numberingPreview } = get();
+    const { project, selectedGroupId } = get();
     const point = project.points.find((p) => p.id === fromId);
     const groupId = selectedGroupId ?? point?.groupId ?? null;
     if (!point || !groupId || point.groupId !== groupId) return;
@@ -2647,7 +2717,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     let resolvedToId = toId;
     if (!resolvedToId) {
       const manualTo = project.groups.find((g) => g.id === groupId)?.numbering.manualLinks?.find((link) => link.fromId === fromId)?.toId ?? null;
-      const route = numberingPreview.groupId === groupId ? numberingPreview.routePointIds : [];
+      const route = group ? buildPreviewOrderForGroup(project, group).route.map(point => point.id) : [];
       const index = route.findIndex((id) => id === fromId);
       resolvedToId = manualTo ?? (index >= 0 ? route[index + 1] ?? null : null);
     }
@@ -2701,7 +2771,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   clearSelectedNumberingManualLinks: () => {
     const { project, selectedGroupId, manualLinkClearSelection, manualLinkClearMode } = get();
     const group = project.groups.find((g) => g.id === selectedGroupId) ?? project.groups[0];
-    if (!group) return;
+    if (!group || group.locked) return;
     const validLinks = getValidManualLinksForGroup(project, group);
     const selected = manualLinkClearMode
       ? new Set(manualLinkClearSelection)
@@ -3141,12 +3211,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!targetGroupId || ids.length === 0) return;
     const state = get();
     const targetGroup = state.project.groups.find((g) => g.id === targetGroupId);
-    if (targetGroup?.locked) return;
-    const lockedGroups = new Set(state.project.groups.filter((g) => g.locked).map((g) => g.id));
-    const allowedIds = ids.filter((id) => {
-      const point = state.project.points.find((p) => p.id === id);
-      return point && (!point.groupId || !lockedGroups.has(point.groupId));
-    });
+    const allowedIds = editableMembershipTargets(state.project, ids, targetGroupId);
     if (allowedIds.length === 0) return;
     const idsSet = new Set(allowedIds);
     get().pushHistory();
@@ -3460,14 +3525,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return;
     }
 
-    get().pushHistory();
     const context = resolveEffectiveGroupNumberingContext(project, group);
-    const result = applyNumberingToGroup(project.points, group, context.startNumber, context.previousEndPoint);
+    const result = applyNumberingToGroup(project.points, group, context.startNumber, context.previousEndPoint, numberingReservations(project, group, true));
     if (result.routeIds.length === 0) {
       set({ numberingPreview: EMPTY_NUMBERING_PREVIEW });
       return;
     }
 
+    get().pushHistory();
     set((state) => ({
       project: {
         ...state.project,
@@ -3499,7 +3564,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return;
     }
 
-    get().pushHistory();
     const originalSelectedGroupId = get().selectedGroupId;
     const originalSelectedPipelineId = get().selectedPipelineId;
     let points = project.points;
@@ -3510,6 +3574,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     for (const pipeline of pipelines) {
       const pipelineGroups = sortedGroupsForPipeline(project, pipeline.id);
+      const reserved = pipelineGroups.length ? numberingReservations(project, pipelineGroups[0]) : new Set<number>();
       let currentStart = pipelineStartNumber(project, pipeline.id);
       let previousEndPoint: PilePoint | null = null;
 
@@ -3517,7 +3582,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         const groupPoints = points.filter((point) => point.groupId === group.id);
         if (groupPoints.length === 0) continue;
 
-        const continuityAnchor = previousEndPoint;
+        const continuityAnchor = project.numberingMode === 'global_sequential' ? previousEndPoint : null;
         const routePreview = buildOrderWithContinuity(groupPoints, group.numbering, continuityAnchor);
         previousEndPoint = routePreview.route[routePreview.route.length - 1] ?? previousEndPoint;
 
@@ -3529,7 +3594,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         }
 
         const groupStart = project.numberingMode === 'global_sequential' ? currentStart : group.numbering.startNumber;
-        const result = applyNumberingToGroup(points, group, groupStart, continuityAnchor);
+        const result = applyNumberingToGroup(points, group, groupStart, continuityAnchor,
+          project.numberingMode === 'global_sequential' ? reserved : numberingReservations(project, group));
         points = result.points;
         if (!fallbackPreviewRouteIds.length && result.routeIds.length > 0) {
           fallbackPreviewRouteIds = result.routeIds;
@@ -3549,6 +3615,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       previewRouteIds = fallbackPreviewRouteIds;
     }
 
+    get().pushHistory();
     set((state) => ({
       project: {
         ...state.project,
@@ -3579,4 +3646,21 @@ let configSaveTimer: ReturnType<typeof setTimeout> | null = null;
 useProjectStore.subscribe((state) => {
   if (configSaveTimer) clearTimeout(configSaveTimer);
   configSaveTimer = setTimeout(() => saveUserConfig(state), 250);
+});
+
+// Invalidate routes on domain changes, including Undo and changes in earlier
+// groups that affect continuity. Camera and panel changes preserve the cache.
+useProjectStore.subscribe((state, previous) => {
+  if (state.project.points === previous.project.points && state.project.groups === previous.project.groups
+    && state.project.pipelines === previous.project.pipelines && state.project.numberingMode === previous.project.numberingMode) return;
+  const preview = state.numberingPreview;
+  if (!preview.groupId || !preview.routePointIds.length) return;
+  const group = state.project.groups.find(group => group.id === preview.groupId);
+  const route = group ? buildPreviewOrderForGroup(state.project, group).route.map(point => point.id) : [];
+  if (group && group.numbering.method === preview.method && route.length === preview.routePointIds.length
+    && route.every((id, index) => id === preview.routePointIds[index])) return;
+  useProjectStore.setState({ numberingPreview: {
+    ...preview, visible: preview.visible && route.length > 0,
+    routePointIds: route, method: group?.numbering.method ?? preview.method, generatedAt: Date.now()
+  } });
 });

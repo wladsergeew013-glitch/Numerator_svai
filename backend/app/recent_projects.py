@@ -5,6 +5,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from app.project_files import atomic_write_project, project_file_lock
 
 _lock = threading.RLock()
 _limit = 20
@@ -35,12 +36,10 @@ def remember_recent_project(config_dir: Path, project_path: Path) -> None:
     path = project_path.resolve()
     if not path.is_file() or not path.name.lower().endswith(".json"):
         return
-    with _lock:
+    config_dir.mkdir(parents=True, exist_ok=True)
+    target = _manifest(config_dir)
+    with _lock, project_file_lock(target):
         entries = [item for item in _read(config_dir)
                    if Path(item["path"]) != path and Path(item["path"]).is_file()]
         entries.insert(0, {"path": str(path), "openedAt": datetime.now(timezone.utc).isoformat()})
-        config_dir.mkdir(parents=True, exist_ok=True)
-        target = _manifest(config_dir)
-        temporary = target.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(entries[:_limit], ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(target)
+        atomic_write_project(target, json.dumps(entries[:_limit], ensure_ascii=False, indent=2))

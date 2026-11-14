@@ -30,6 +30,8 @@ tests/out/
 # Local/runtime data
 config/user_config.json
 config/detached_windows.json
+config/recent_projects.json
+config/.*.lock
 projects/*.autosave_*.pilenum.json
 autosaves/
 data/images/
@@ -51,4 +53,5 @@ data/previous-builds/
 Thumbs.db
 
 projects/*.pilenum.json
+projects/.*.lock
 !projects/.gitkeep

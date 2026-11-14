@@ -1,4 +1,5 @@
 import { cadAxisPlacement } from '../utils/cadAxes';
+import { workspaceKeyboardBlocked } from '../utils/workspaceKeyboard';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Arrow, Circle, Group, Layer, Line, Rect, Stage, Text } from 'react-konva';
 import { KonvaEventObject } from 'konva/lib/Node';
@@ -1342,6 +1343,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     canvasWrapRef.current?.focus({ preventScroll: true });
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (workspaceKeyboardBlocked(event)) return;
       const isEscape = event.key === 'Escape' || event.key === 'Esc' || event.code === 'Escape';
       const isEnter = event.key === 'Enter' || event.code === 'Enter' || event.code === 'NumpadEnter';
       if (!isEscape && !isEnter) return;
@@ -1383,6 +1385,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
 
     const stopStroke = () => setVectorPointerDown(false);
     const onKeyDown = (event: KeyboardEvent) => {
+      if (workspaceKeyboardBlocked(event)) return;
       const isEscape = event.key === 'Escape' || event.key === 'Esc' || event.code === 'Escape';
       const isEnter = event.key === 'Enter' || event.code === 'Enter' || event.code === 'NumpadEnter';
       const isUndo = (event.ctrlKey || event.metaKey) && (event.key.toLowerCase() === 'z' || event.code === 'KeyZ');
@@ -1416,6 +1419,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     }
     canvasWrapRef.current?.focus({ preventScroll: true });
     const onKeyDown = (event: KeyboardEvent) => {
+      if (workspaceKeyboardBlocked(event)) return;
       const isEscape = event.key === 'Escape' || event.key === 'Esc' || event.code === 'Escape';
       const isDelete = event.key === 'Delete' || event.key === 'Backspace';
       const isEnter = event.key === 'Enter' || event.code === 'Enter' || event.code === 'NumpadEnter';

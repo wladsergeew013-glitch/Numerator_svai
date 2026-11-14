@@ -31,6 +31,8 @@ function mount(api) {
       if (name === 'react/jsx-runtime') return {};
       if (name.endsWith('/useProjectStore')) return { useProjectStore: { getState: () => ({ project: 'saved', savedProjectSignature: 'saved' }) } };
       if (name.endsWith('/projectSaveState')) return { projectSaveSignature: value => value };
+      if (name.endsWith('/projectSession')) return { captureProjectContext: () => ({sessionId:'test'}) };
+      if (name.endsWith('/api/client')) return {};
       throw new Error(`Unexpected import ${name}`);
     },
   };

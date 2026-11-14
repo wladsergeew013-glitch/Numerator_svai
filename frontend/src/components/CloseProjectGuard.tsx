@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useProjectStore } from '../store/useProjectStore';
 import { projectSaveSignature } from '../utils/projectSaveState';
+import { captureProjectContext, type ProjectTransitionRequest } from '../utils/projectSession';
+import { saveLocalProject } from '../api/client';
 
 interface DesktopBridge {
   frontendReady: () => Promise<void>;
@@ -18,7 +20,21 @@ export function CloseProjectGuard() {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [transitioning, setTransitioning] = useState(false);
+  const pendingTransition = useRef<ProjectTransitionRequest | null>(null);
   const closing = useRef(false);
+  const cancel = () => {
+    pendingTransition.current?.respond(false);
+    pendingTransition.current = null;
+    setOpen(false);
+  };
+  const proceed = async () => {
+    if (pendingTransition.current) {
+      pendingTransition.current.respond(true);
+      pendingTransition.current = null;
+      setOpen(false);
+    } else await finish();
+  };
   const finish = async () => {
     const api = bridge();
     if (typeof api?.closeConfirmed !== 'function') {
@@ -52,14 +68,27 @@ export function CloseProjectGuard() {
     };
     const requestClose = () => {
       if (closing.current) return;
+      pendingTransition.current?.respond(false);
+      pendingTransition.current = null;
+      setTransitioning(false);
       if (!isDirty()) { void finish(); }
       else { setError(''); setOpen(true); }
+    };
+    const requestTransition = (event: Event) => {
+      const request = (event as CustomEvent<ProjectTransitionRequest>).detail;
+      request.handled = true;
+      pendingTransition.current?.respond(false);
+      pendingTransition.current = request;
+      setTransitioning(true);
+      setError('');
+      setOpen(true);
     };
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (!closing.current && isDirty()) { event.preventDefault(); event.returnValue = ''; }
     };
     window.addEventListener('pywebviewready', ready);
     window.addEventListener('pile-numbering:close-requested', requestClose);
+    window.addEventListener('pile-numbering:project-transition-requested', requestTransition);
     window.addEventListener('beforeunload', beforeUnload);
     ready();
     return () => {
@@ -67,34 +96,41 @@ export function CloseProjectGuard() {
       window.cancelAnimationFrame(paintFrame);
       window.removeEventListener('pywebviewready', ready);
       window.removeEventListener('pile-numbering:close-requested', requestClose);
+      window.removeEventListener('pile-numbering:project-transition-requested', requestTransition);
+      pendingTransition.current?.respond(false);
+      pendingTransition.current = null;
       window.removeEventListener('beforeunload', beforeUnload);
     };
   }, []);
   const saveAndClose = async () => {
     const api = bridge();
-    if (typeof api?.saveProjectJson !== 'function') { setError('Сохраните проект командой «Сохранить» перед закрытием вкладки.'); return; }
     setSaving(true); setError('');
     const project = useProjectStore.getState().project;
+    const context = captureProjectContext();
     try {
       const name = (project.project.name || 'Проект').replace(/[<>:"/\\|?*]/g, '_');
-      const result = await api.saveProjectJson(`${name}.pilenum.json`, JSON.stringify(project, null, 2));
+      const result: { saved?: boolean; canceled?: boolean; error?: string } = typeof api?.saveProjectJson === 'function'
+        ? await api.saveProjectJson(`${name}.pilenum.json`, JSON.stringify(project, null, 2))
+        : await saveLocalProject(project);
       if (result.canceled) return;
       if (!result.saved) throw new Error(result.error || 'Не удалось сохранить проект.');
-      useProjectStore.getState().markProjectSaved(project);
+      if (!useProjectStore.getState().markProjectSaved(project, context.sessionId)) {
+        setError('Текущий проект сменился. Результат сохранения относится к прежнему проекту.'); return;
+      }
       if (isDirty()) { setError('Проект изменился во время сохранения. Сохраните актуальное состояние ещё раз.'); return; }
-      await finish();
+      await proceed();
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setSaving(false); }
   };
   if (!open) return null;
   return <div className="close-project-backdrop">
     <section className="close-project-dialog" role="dialog" aria-modal="true" aria-labelledby="close-project-title">
-      <h2 id="close-project-title">Сохранить изменения проекта?</h2>
-      <p>В проекте есть несохранённые изменения. Выберите, как завершить работу.</p>
+      <h2 id="close-project-title">{transitioning ? 'Сохранить изменения перед сменой проекта?' : 'Сохранить изменения проекта?'}</h2>
+      <p>{transitioning ? 'Сохраните текущий проект или подтвердите переход без сохранения.' : 'В проекте есть несохранённые изменения. Выберите, как завершить работу.'}</p>
       {error && <p role="alert">{error}</p>}
       <div className="dialog-actions-row">
-        <button className="btn" disabled={saving} onClick={() => setOpen(false)}>Отмена</button>
-        <button className="btn" disabled={saving} onClick={() => void finish()}>Не сохранять</button>
+        <button className="btn" disabled={saving} onClick={cancel}>Отмена</button>
+        <button className="btn" disabled={saving} onClick={() => void proceed()}>Не сохранять</button>
         <button className="btn primary" disabled={saving} autoFocus onClick={() => void saveAndClose()}>{saving ? 'Сохранение…' : 'Сохранить'}</button>
       </div>
     </section>
