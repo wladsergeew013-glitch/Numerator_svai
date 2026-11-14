@@ -406,6 +406,7 @@ class TransferTests(unittest.TestCase):
 
     def test_optional_dwg_save_and_save_failure_preserve_write_result(self):
         doc = Document([entity('A')])
+        doc.FullName = str(Path('model.dwg').resolve())
         result = self.export(doc, [point('a', 0)], saveDrawing=True)
         self.assertTrue(result['saved'])
         self.assertEqual(doc.saves, 1)
