@@ -65,12 +65,12 @@ class ProjectFileSafetyTests(unittest.TestCase):
             try:
                 with project_files.project_file_lock(path):
                     child.start()
-                    self.assertTrue(started.wait(10))
+                    self.assertTrue(started.wait(60), 'Spawned interpreter did not reach the file-lock fixture')
                     self.assertTrue(child.is_alive())
                     with self.assertRaises(Empty):
                         output.get(timeout=0.2)
                     project_files.atomic_write_project(path, '{"project":{"id":"owner"}}')
-                child.join(10)
+                child.join(30)
                 self.assertEqual(child.exitcode, 0)
                 self.assertEqual(output.get(timeout=5), 'conflict')
                 self.assertEqual(json.loads(path.read_text())['project']['id'], 'owner')

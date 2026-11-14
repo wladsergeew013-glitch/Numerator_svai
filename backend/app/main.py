@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+import csv
+import math
+import tempfile
+import inspect
+from decimal import Decimal, InvalidOperation
 import logging
 import os
 import re
@@ -9,23 +14,29 @@ import time
 import traceback
 import hashlib
 from logging.handlers import RotatingFileHandler
-from uuid import uuid4
+from uuid import uuid4, UUID
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ValidationError, Field
+from fastapi.responses import FileResponse
+from fastapi.exceptions import RequestValidationError
+from app.icon_assets import SAFE_ICON_NAME, validate_icon
+from pydantic import ValidationError, Field, field_validator
 from app import cad_operations as cad
 from app.version import APP_VERSION
 
 from app.io_project import import_points_from_csv
-from app.project_files import ProjectFileConflict, save_project_file
+from app.project_files import ProjectFileConflict, save_project_file, project_file_lock, atomic_write_project
+from app.runtime_paths import RuntimePaths
+from app.http_boundary import LocalApiBoundary
 from app.recent_projects import list_recent_projects as read_recent_projects, remember_recent_project
 from app.numbering_rows import apply_numbering_rows
 from app.clustering_methods import ClusterPreviewRequest, preview_clusters
 from app.schemas import (
+    BaseModel,
+    SAFE_INTEGER,
     CsvImportResponse,
     LocalProjectInfo,
     LocalProjectListResponse,
@@ -36,6 +47,7 @@ from app.schemas import (
     PilePoint,
     SyncState,
     UserConfig,
+    UserConfigPatch,
     ValidateProjectResponse,
 )
 
@@ -49,29 +61,16 @@ def clustering_preview(request: ClusterPreviewRequest):
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(LocalApiBoundary)
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-PROJECTS_DIR = ROOT_DIR / "projects"
-CONFIG_DIR = ROOT_DIR / "config"
-AUTOSAVES_DIR = ROOT_DIR / "autosaves"
-DATA_DIR = ROOT_DIR / "data"
-LOGS_DIR = ROOT_DIR / "logs"
-IMAGES_DIR = DATA_DIR / "images"
-USER_CONFIG_PATH = CONFIG_DIR / "user_config.json"
-APP_ICON_PATH = CONFIG_DIR / "app_icon.ico"
+globals().update(RuntimePaths.default().globals())
 
 _BACKEND_LOGGER: logging.Logger | None = None
 _BACKEND_LOGGER_PATH: Path | None = None
 _MODELSTUDIO_SCAN_CACHE: dict[str, dict] = {}
 _BLOCK_SCAN_CACHE: dict[str, dict] = {}
 _MODELSTUDIO_SCAN_TTL_SECONDS = 600
+_CAD_SESSION_ID = uuid4().hex
 
 
 def _runtime_logs_dir() -> Path:
@@ -123,7 +122,7 @@ def _get_backend_logger() -> logging.Logger:
 
 def _json_safe(value):
     try:
-        json.dumps(value, ensure_ascii=False)
+        json.dumps(value, ensure_ascii=False, allow_nan=False)
         return value
     except Exception:
         if isinstance(value, dict):
@@ -134,6 +133,11 @@ def _json_safe(value):
             return str(value)
         except Exception:
             return f"<{type(value).__name__}>"
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={'detail': _json_safe(exc.errors())})
 
 
 def _log_backend_error(context: str, exc: Exception | None = None, extra: dict | None = None, level: int = logging.ERROR) -> str:
@@ -213,9 +217,15 @@ def _ensure_data_dir() -> None:
 
 def _safe_file_name(value: str) -> str:
     name = (value or "project").strip()
-    name = re.sub(r"[\\/:*?\"<>|]+", "_", name)
+    name = re.sub(r"[\x00-\x1f\x7f\\/:*?\"<>|]+", "_", name)
     name = re.sub(r"\s+", "_", name)
     name = name.strip("._ ") or "project"
+    stem = name.split('.')[0].upper()
+    if stem in {'CON', 'PRN', 'AUX', 'NUL', 'CLOCK$', 'CONIN$', 'CONOUT$', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10)), 'COM¹', 'COM²', 'COM³', 'LPT¹', 'LPT²', 'LPT³'}:
+        name = '_' + name
+    suffix = '.pilenum.json'
+    if name.lower().endswith(suffix): name = name[:-len(suffix)]
+    name = name[:160].rstrip('._ ') or 'project'
     if not name.lower().endswith(".pilenum.json"):
         name = f"{name}.pilenum.json"
     return name
@@ -321,32 +331,40 @@ def get_user_config() -> UserConfig:
 
 
 @app.post("/api/config/user", response_model=UserConfig)
-def save_user_config(config: UserConfig) -> UserConfig:
+@app.patch("/api/config/user", response_model=UserConfig)
+def save_user_config(config: UserConfigPatch) -> UserConfig:
     _ensure_config_dir()
-    incoming = config.model_dump(mode="json", exclude_none=True)
+    incoming = config.model_dump(mode="json", exclude_unset=True)
     if "nanoCadVersion" not in config.model_fields_set:
         incoming.pop("nanoCadVersion", None)
-    existing: dict = {}
-    if USER_CONFIG_PATH.exists():
-        try:
-            loaded = json.loads(USER_CONFIG_PATH.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                existing = loaded
-        except Exception:
-            existing = {}
+    with project_file_lock(USER_CONFIG_PATH):
+        existing: dict = {}
+        if USER_CONFIG_PATH.exists():
+            try:
+                loaded = json.loads(USER_CONFIG_PATH.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except Exception:
+                existing = {}
 
-    merged = {**existing, **incoming}
-    merged["gridSettings"] = {**existing.get("gridSettings", {}), **incoming.get("gridSettings", {})}
-    merged["viewSettings"] = {**existing.get("viewSettings", {}), **incoming.get("viewSettings", {})}
-    merged["panels"] = {**existing.get("panels", {}), **incoming.get("panels", {})}
-    merged["autosaveSettings"] = {**existing.get("autosaveSettings", {}), **incoming.get("autosaveSettings", {})}
+        def merge(old, patch):
+            result = dict(old)
+            for key, value in patch.items():
+                if key == 'commandIcons' and isinstance(value, dict):
+                    icons = dict(result.get(key, {}))
+                    for command, url in value.items():
+                        if url is None: icons.pop(command, None)
+                        else: icons[command] = url
+                    result[key] = icons
+                elif isinstance(value, dict) and isinstance(result.get(key), dict):
+                    result[key] = merge(result[key], value)
+                else:
+                    result[key] = value
+            return result
+        normalized = UserConfig.model_validate(merge(existing, incoming))
+        atomic_write_project(USER_CONFIG_PATH, json.dumps(normalized.model_dump(mode='json'), ensure_ascii=False, indent=2))
+        return normalized
 
-    normalized = UserConfig.model_validate(merged)
-    USER_CONFIG_PATH.write_text(
-        json.dumps(normalized.model_dump(mode="json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return normalized
 
 
 
@@ -362,14 +380,71 @@ async def upload_app_icon(file: UploadFile = File(...)) -> dict[str, object]:
     """
     if not file.filename or not file.filename.lower().endswith(".ico"):
         raise HTTPException(status_code=400, detail="Only .ico files are supported for EXE icon")
-    content = await file.read()
+    content = await file.read(2_000_001)
     if not content:
         raise HTTPException(status_code=400, detail="Empty icon file")
     if len(content) > 2_000_000:
         raise HTTPException(status_code=400, detail="Icon file is too large")
+    try:
+        if content[:4] != b'\x00\x00\x01\x00': raise ValueError('Expected ICO content')
+        validate_icon(content, file.filename)
+    except Exception as exc:
+        raise HTTPException(400, 'Invalid ICO file') from exc
     _ensure_config_dir()
     APP_ICON_PATH.write_bytes(content)
     return {"saved": True, "fileName": APP_ICON_PATH.name, "path": str(APP_ICON_PATH)}
+
+
+def _icon_path(name: str) -> Path:
+    if not SAFE_ICON_NAME.fullmatch(name): raise HTTPException(400, 'Invalid icon filename')
+    folder = CONFIG_DIR / 'icons'
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / name
+
+
+@app.get('/api/assets/icons')
+def list_user_icons():
+    folder = CONFIG_DIR / 'icons'
+    return {'icons': [{'fileName': p.name, 'url': '/api/assets/icons/' + p.name,
+        'contentType': 'image/svg+xml' if p.suffix == '.svg' else 'image/png', 'sizeBytes': p.stat().st_size}
+        for p in sorted(folder.glob('*')) if p.is_file() and SAFE_ICON_NAME.fullmatch(p.name)]}
+
+
+@app.post('/api/assets/icons')
+async def upload_user_icon(file: UploadFile = File(...)):
+    try:
+        content, suffix, content_type = validate_icon(await file.read(2_000_001), file.filename or '')
+    except Exception as exc:
+        raise HTTPException(400, 'Invalid icon: ' + str(exc)) from exc
+    name = hashlib.sha256(content).hexdigest() + suffix
+    path = _icon_path(name)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name); stream.write(content); stream.flush(); os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None: temporary.unlink(missing_ok=True)
+    return {'icon': {'fileName': name, 'url': '/api/assets/icons/' + name, 'contentType': content_type, 'sizeBytes': len(content)}}
+
+
+@app.get('/api/assets/icons/{file_name}')
+def get_user_icon(file_name: str):
+    path = _icon_path(file_name)
+    if not path.is_file(): raise HTTPException(404, 'Icon not found')
+    return FileResponse(path, media_type='image/svg+xml' if path.suffix == '.svg' else 'image/png',
+        headers={'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'"})
+
+
+@app.delete('/api/assets/icons/{file_name}')
+def delete_user_icon(file_name: str):
+    path = _icon_path(file_name)
+    with project_file_lock(USER_CONFIG_PATH):
+        config = get_user_config()
+        config.commandIcons = {key: value for key, value in config.commandIcons.items() if value != '/api/assets/icons/' + file_name}
+        atomic_write_project(USER_CONFIG_PATH, config.model_dump_json(indent=2))
+        path.unlink(missing_ok=True)
+    return {'deleted': True}
 
 
 @app.post("/api/import/csv", response_model=CsvImportResponse)
@@ -377,9 +452,11 @@ async def import_csv(file: UploadFile = File(...)) -> CsvImportResponse:
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported")
     try:
-        content = await file.read()
+        content = await file.read(16_000_001)
+        if len(content) > 16_000_000:
+            raise ValueError("CSV exceeds 16 MB")
         return import_points_from_csv(content)
-    except ValueError as exc:
+    except (ValueError, csv.Error) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -587,7 +664,7 @@ class NanoCadBlockImportRequest(BaseModel):
     numberAttribute: str | None = None
     baseX: float = 0.0
     baseY: float = 0.0
-    tolerance: float = 1.0
+    tolerance: float = Field(default=1.0, gt=0)
 
 
 class NanoCadExportPoint(BaseModel):
@@ -595,9 +672,20 @@ class NanoCadExportPoint(BaseModel):
     id: str | None = None
     x: float
     y: float
-    number: str | int | float | None = None
+    number: int | None = Field(default=None, strict=True, ge=-SAFE_INTEGER, le=SAFE_INTEGER)
     sourceNumber: str | int | float | None = None
     groupId: str | None = None
+
+    @field_validator('number', mode='before')
+    @classmethod
+    def integral_number(cls, value):
+        if value is None: return None
+        if isinstance(value, bool): raise ValueError('Number must be an integer')
+        if isinstance(value, str):
+            if not re.fullmatch(r'[+-]?\d+', value.strip()): raise ValueError('Number must be an integer')
+            return int(value.strip())
+        if isinstance(value, float) and math.isfinite(value) and value.is_integer(): return int(value)
+        return value
 
 
 class NanoCadBlockExportRequest(BaseModel):
@@ -608,7 +696,7 @@ class NanoCadBlockExportRequest(BaseModel):
     points: list[NanoCadExportPoint]
     baseX: float = 0.0
     baseY: float = 0.0
-    tolerance: float = 1.0
+    tolerance: float = Field(default=1.0, gt=0)
     selectedGroupIds: list[str] | None = None
 
 
@@ -622,7 +710,7 @@ class NanoCadModelStudioImportRequest(BaseModel):
     numberParameter: str | None = None
     baseX: float = 0.0
     baseY: float = 0.0
-    tolerance: float = 1.0
+    tolerance: float = Field(default=1.0, gt=0)
 
 
 class NanoCadModelStudioExportRequest(BaseModel):
@@ -637,13 +725,14 @@ class NanoCadModelStudioExportRequest(BaseModel):
     points: list[NanoCadExportPoint]
     baseX: float = 0.0
     baseY: float = 0.0
-    tolerance: float = 1.0
+    tolerance: float = Field(default=1.0, gt=0)
     selectedGroupIds: list[str] | None = None
 
 
 class NanoCadSelectHandleRequest(BaseModel):
     handle: str
     documentPath: str
+    documentGuid: str | None = None
     objectName: str | None = None
 
 
@@ -651,6 +740,7 @@ class NanoCadPointActionRequest(BaseModel):
     action: str = Field(pattern='^(read|write|position)$')
     handle: str
     documentPath: str
+    documentGuid: str | None = None
     objectName: str | None = None
     objectKind: str = Field(default='model_studio', pattern='^(model_studio|block)$')
     parameterName: str | None = None
@@ -661,6 +751,8 @@ cad.log_event = _log_backend_error
 
 
 def _raise_if_cad_disconnected(exc):
+    if isinstance(exc, cad.CadCancelled): raise exc
+    if isinstance(exc, HTTPException) and exc.status_code >= 500: raise exc
     from app.sdk_bridge import SdkBridgeError
     if isinstance(exc, SdkBridgeError):
         raise HTTPException(503, str(exc)) from exc
@@ -692,7 +784,8 @@ def _cad_scope(doc, model_space, scope='auto'):
 
 def _coerce_float_triplet(value) -> tuple[float, float, float] | None:
     try:
-        return float(value[0]), float(value[1]), float(value[2] if len(value) > 2 else 0.0)
+        result = float(value[0]), float(value[1]), float(value[2] if len(value) > 2 else 0.0)
+        return result if all(math.isfinite(v) for v in result) else None
     except Exception:
         return None
 
@@ -949,24 +1042,34 @@ def _parse_numeric_number(value) -> int | None:
         return None
     if re.fullmatch(r'[-+]?\d+', text):
         try:
-            return int(text)
+            number = int(text)
+            return number if abs(number) <= 2**53 - 1 else None
         except Exception:
             return None
     if re.fullmatch(r'[-+]?\d+\.\d+', text):
         try:
-            parsed = float(text)
-            return int(parsed) if parsed.is_integer() else None
+            parsed = Decimal(text)
+            return int(parsed) if parsed == parsed.to_integral_value() and abs(parsed) <= 2**53 - 1 else None
         except Exception:
             return None
     return None
 
 
 def _export_number_text(point: NanoCadExportPoint) -> str | None:
-    value = point.number if point.number is not None else point.sourceNumber
+    value = point.number
     if value is None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _cad_values_equal(actual, expected) -> bool:
+    a, b = str(actual).strip(), str(expected).strip()
+    if a == b: return True
+    try:
+        left, right = Decimal(a.replace(',', '.')), Decimal(b.replace(',', '.'))
+        return left.is_finite() and right.is_finite() and left == right
+    except InvalidOperation: return False
 
 
 def _set_block_attribute(entity, attr_name: str, value: str) -> bool:
@@ -983,9 +1086,11 @@ def _set_block_attribute(entity, attr_name: str, value: str) -> bool:
                     entity.Update()
                 except Exception:
                     pass
-                return True
-    except Exception:
-        pass
+                verified = _cad_values_equal(getattr(item, 'TextString', ''), value)
+                if not verified: cad.emit('block_write_readback_mismatch', expected=value, actual=getattr(item, 'TextString', None))
+                return verified
+    except Exception as exc:
+        _raise_if_cad_disconnected(exc)
     return False
 
 
@@ -1000,20 +1105,59 @@ def _filter_export_points(points: list[NanoCadExportPoint], selected_group_ids: 
     return [p for p in points if p.groupId in allowed]
 
 
-def _find_nearest_export_point(x: float, y: float, points: list[NanoCadExportPoint], used: set[int], base_x: float, base_y: float, tolerance: float) -> tuple[int, NanoCadExportPoint, float] | None:
-    best: tuple[int, NanoCadExportPoint, float] | None = None
-    safe_tolerance = max(0.000001, float(tolerance or 1.0))
-    for index, point in enumerate(points):
-        if index in used:
-            continue
-        number_text = _export_number_text(point)
-        if number_text is None:
-            continue
-        px, py = _point_match_key(point, base_x, base_y)
-        dist = ((x - px) ** 2 + (y - py) ** 2) ** 0.5
-        if dist <= safe_tolerance and (best is None or dist < best[2]):
-            best = (index, point, dist)
-    return best
+def _invalidate_scan_caches():
+    _MODELSTUDIO_SCAN_CACHE.clear()
+    _BLOCK_SCAN_CACHE.clear()
+
+
+def _live_export_record(doc, candidate, kind, tolerance):
+    from app.sdk_bridge import SdkEntity
+    cached = candidate if isinstance(candidate, dict) else None
+    entity = doc.HandleToObject(cached['handle']) if cached else (doc.HandleToObject(candidate.Handle) if isinstance(candidate, SdkEntity) else candidate)
+    valid = _is_block_reference(entity) if kind == 'block' else _has_modelstudio_element(entity)
+    if not valid:
+        if cached: raise HTTPException(409, 'Тип объекта изменился. Повторите сканирование.')
+        return None
+    name = _block_name(entity) if kind == 'block' else _modelstudio_name(entity)
+    insertion = _coerce_float_triplet(getattr(entity, 'InsertionPoint', None)) if kind == 'block' else _entity_insertion_point(entity)
+    if cached and (name != cached['name'] or insertion is None or math.dist(insertion, cached['insertion']) > tolerance):
+        raise HTTPException(409, 'Геометрия или тип объекта изменились после скана. Повторите сканирование.')
+    return {'entity': entity, 'name': name, 'handle': str(getattr(entity, 'Handle', '') or '').upper(), 'insertion': insertion}
+
+
+def _coordinate_export_plan(records, points, base_x, base_y, tolerance, excluded=frozenset()):
+    edges = []
+    for r, record in enumerate(records):
+        if record['insertion'] is None: continue
+        x, y, z = record['insertion']
+        for i, point in enumerate(points):
+            if i in excluded or _export_number_text(point) is None: continue
+            if point.meta.get('objectName') and point.meta['objectName'] != record['name']: continue
+            px, py = _point_match_key(point, base_x, base_y)
+            raw_z = point.meta.get('rawInsertionPoint', {}).get('z') if isinstance(point.meta.get('rawInsertionPoint'), dict) else None
+            dz = z - raw_z if isinstance(raw_z, (float, int)) and math.isfinite(raw_z) else 0
+            distance = math.hypot(x-px, y-py, dz)
+            if distance <= tolerance: edges.append((distance, r, i))
+    ordered = sorted(edges)
+    by_record, by_point = {}, {}
+    for edge in ordered:
+        by_record.setdefault(edge[1], []).append(edge)
+        by_point.setdefault(edge[2], []).append(edge)
+    used_records, used_points, result = set(), set(excluded), []
+    for distance, r, i in ordered:
+        if r in used_records or i in used_points: continue
+        # Check again after earlier assignments: a previously unique nearest
+        # neighbour may now be occupied, revealing an ambiguous second choice.
+        for candidates, occupied, axis in ((by_record[r], used_points, 2), (by_point[i], used_records, 1)):
+            nearest = []
+            for candidate in candidates:
+                if candidate[axis] not in occupied: nearest.append(candidate[0])
+                if len(nearest) == 2: break
+            if len(nearest) == 2 and math.isclose(nearest[0], nearest[1], abs_tol=1e-9, rel_tol=1e-12):
+                raise HTTPException(409, 'Неоднозначное сопоставление координат. Уточните допуск, типы или связи объектов до записи.')
+        used_records.add(r); used_points.add(i)
+        result.append((records[r], (i, points[i], distance)))
+    return result
 
 
 def _has_modelstudio_element(entity) -> bool:
@@ -1031,7 +1175,7 @@ def _modelstudio_api_type(entity) -> str:
     grouping piles: several different parametric parts may share the same API
     type. Grouping must use the real Model Studio element/object name.
     """
-    for attr in ('Name', 'ObjectName', 'ClassName'):
+    for attr in ('ObjectName', 'ClassName'):
         try:
             value = getattr(entity, attr)
             if value:
@@ -1119,7 +1263,8 @@ def _safe_float(value) -> float | None:
         text = str(value).strip().replace(',', '.')
         if not text or text.lower() in {'default', 'none', 'nan'}:
             return None
-        return float(text)
+        value = float(text)
+        return value if math.isfinite(value) else None
     except Exception:
         return None
 
@@ -1425,6 +1570,7 @@ def _cad_select_lisp(handle: str) -> str:
 def select_nanocad_object_by_handle(request: NanoCadSelectHandleRequest) -> dict:
     script = _cad_select_lisp(request.handle)
     app_obj, doc, _ms = _connect_nanocad()
+    _verify_document_binding(doc, request.documentPath, request.documentGuid)
     current_document = str(getattr(doc, 'FullName', '') or '').strip()
     source_document = request.documentPath.strip()
     norm = lambda value: value.replace('\\', '/').casefold()
@@ -1452,10 +1598,14 @@ def select_nanocad_object_by_handle(request: NanoCadSelectHandleRequest) -> dict
 @app.post('/api/nanocad/point/action')
 @cad.serialized
 def act_on_nanocad_point(request: NanoCadPointActionRequest) -> dict:
+    if request.action == 'write' and (not re.fullmatch(r'[+-]?\d+', str(request.value or '').strip())
+            or _parse_numeric_number(request.value) is None):
+        raise HTTPException(422, 'Для записи нужен целый номер в безопасном диапазоне ±9007199254740991.')
     handle = request.handle.strip().upper()
     if not re.fullmatch(r'[0-9A-F]+', handle):
         raise HTTPException(422, 'Некорректный handle объекта.')
     _app, doc, _ms = _connect_nanocad()
+    _verify_document_binding(doc, request.documentPath, request.documentGuid)
     current_document = str(getattr(doc, 'FullName', '') or '').strip()
     source_document = request.documentPath.strip()
     if not current_document or not source_document or Path(current_document).as_posix().casefold() != Path(source_document).as_posix().casefold():
@@ -1477,6 +1627,7 @@ def act_on_nanocad_point(request: NanoCadPointActionRequest) -> dict:
         insertion = _entity_insertion_point(entity)
     if request.objectName and object_name != request.objectName:
         raise HTTPException(409, 'Тип объекта изменился после импорта. Повторите сканирование и импорт.')
+    if request.action == 'write': _invalidate_scan_caches()
     result = {'handle': handle, 'documentName': str(getattr(doc, 'Name', '') or ''), 'objectName': object_name}
     if request.action == 'position':
         if insertion is None:
@@ -1646,11 +1797,34 @@ def _suggest_modelstudio_number_parameter(parameters: dict[str, str]) -> str:
 
 
 def _modelstudio_scan_document_key(doc) -> str:
-    # SDK documents expose unsaved:<GUID>; saved drawings retain their full path.
-    return str(getattr(doc, 'FullName', '') or '').strip().replace('\\', '/').casefold()
+    path = str(getattr(doc, 'FullName', '') or '').strip().replace('\\', '/').casefold()
+    guid = _document_guid(doc)
+    return f'{path}|{guid}|{_CAD_SESSION_ID}'
+
+
+def _document_guid(doc) -> str:
+    from app.sdk_bridge import SdkDocument
+    try:
+        raw = doc.FingerprintGuid if isinstance(doc, SdkDocument) else doc.GetVariable('FINGERPRINTGUID')
+        guid = UUID(str(raw).strip('{}'))
+        return str(guid) if guid.int else ''
+    except Exception as exc:
+        _raise_if_cad_disconnected(exc)
+        return ''
+
+
+def _verify_document_binding(doc, source_path, source_guid):
+    current_path = str(getattr(doc, 'FullName', '') or '').replace('\\', '/').casefold()
+    expected_path = str(source_path or '').replace('\\', '/').casefold()
+    guid = _document_guid(doc)
+    try: expected_guid = str(UUID(str(source_guid).strip('{}')))
+    except (ValueError, TypeError, AttributeError): expected_guid = ''
+    if not current_path or current_path != expected_path or not guid or guid != expected_guid:
+        raise HTTPException(409, 'Связь относится к другой или прежней базе DWG. Повторите сканирование и импорт для привязки к GUID базы.')
 
 
 def _modelstudio_cached_scan(scan_id: str, doc, requested_scope: str) -> dict:
+    if not _document_guid(doc): raise HTTPException(409, 'Не получен GUID базы DWG. Повторите подключение и сканирование.')
     now = time.monotonic()
     for key, snapshot in list(_MODELSTUDIO_SCAN_CACHE.items()):
         if now - snapshot['createdAt'] > _MODELSTUDIO_SCAN_TTL_SECONDS:
@@ -1664,6 +1838,7 @@ def _modelstudio_cached_scan(scan_id: str, doc, requested_scope: str) -> dict:
 
 
 def _block_cached_scan(scan_id: str, doc, requested_scope: str) -> dict:
+    if not _document_guid(doc): raise HTTPException(409, 'Не получен GUID базы DWG. Повторите подключение и сканирование.')
     now = time.monotonic()
     for key, snapshot in list(_BLOCK_SCAN_CACHE.items()):
         if now - snapshot['createdAt'] > _MODELSTUDIO_SCAN_TTL_SECONDS:
@@ -1679,7 +1854,7 @@ def _block_cached_scan(scan_id: str, doc, requested_scope: str) -> dict:
 def _modelstudio_import_point(*, name: str, api_type: str, handle: str, insertion: tuple,
                               document_path: str, number_parameter: str, source_number: str | None,
                               params: dict[str, str], request: NanoCadModelStudioImportRequest,
-                              ordinal: int) -> PilePoint:
+                              ordinal: int, document_guid: str = '') -> PilePoint:
     x, y, z = insertion
     return PilePoint(
         id=f'p-{uuid4().hex[:12]}',
@@ -1689,7 +1864,7 @@ def _modelstudio_import_point(*, name: str, api_type: str, handle: str, insertio
         groupId=None, locked=False, manualNumber=False, syncState=SyncState.added,
         meta={
             'source': 'nanocad_modelstudio',
-            **({'cadHandle': handle, 'cadDocument': document_path} if request.preserveHandles else {}),
+            **({'cadHandle': handle, 'cadDocument': document_path, 'cadDocumentGuid': document_guid} if request.preserveHandles else {}),
             'objectName': name, 'apiType': api_type,
             'numberParameter': number_parameter or None,
             'importBasePoint': {'x': request.baseX, 'y': request.baseY},
@@ -1711,6 +1886,19 @@ def _set_modelstudio_parameter(entity, parameter_name: str, value: str) -> bool:
     if not clean_name:
         return False
     clean_value = str(value)
+    from app.sdk_bridge import SdkEntity
+    if isinstance(entity, SdkEntity):
+        found, _current, actual_name = _read_modelstudio_parameter(entity, clean_name)
+        if not found:
+            cad.emit('modelstudio_write_parameter_missing', parameter=clean_name)
+            return False
+        clean_name = actual_name
+        try: entity.write('parameter', clean_name, clean_value)
+        except Exception as exc:
+            _raise_if_cad_disconnected(exc)
+            return False
+        found, actual, _ = _read_modelstudio_parameter(entity, clean_name)
+        return found and _cad_values_equal(actual, clean_value)
 
     try:
         element = getattr(entity, 'Element')
@@ -1797,17 +1985,24 @@ def _set_modelstudio_parameter(entity, parameter_name: str, value: str) -> bool:
         try:
             param = params.Item(clean_name)
             current = getattr(param, 'Value', '')
-            return str(current if current is not None else '') == clean_value
+            return _cad_values_equal(current if current is not None else '', clean_value)
         except Exception as exc:
             _raise_if_cad_disconnected(exc)
             current = next((v for k, v in _iter_modelstudio_parameters(entity).items()
                             if k.casefold() == clean_name.casefold()), None)
-            return current is not None and str(current) == clean_value
+            return current is not None and _cad_values_equal(current, clean_value)
 
     existing = existing_parameter()
     if existing is None:
         cad.emit('modelstudio_write_parameter_missing', parameter=clean_name)
         return False
+    actual_name = str(getattr(existing, 'Name', '') or '').strip()
+    if actual_name.casefold() == clean_name.casefold(): clean_name = actual_name
+    named_lookup = True
+    try: params.Item(clean_name)
+    except Exception as exc:
+        _raise_if_cad_disconnected(exc)
+        named_lookup = False
     caption = ''
     comment = ''
     if existing is not None:
@@ -1823,22 +2018,30 @@ def _set_modelstudio_parameter(entity, parameter_name: str, value: str) -> bool:
             comment = ''
 
     # Correct documented writer: Element.Parameters.SetParameter(...).
-    set_parameter = getattr(params, 'SetParameter', None)
+    set_parameter = getattr(params, 'SetParameter', None) if named_lookup else None
     if callable(set_parameter):
         for args in (
             (clean_name, clean_value),
             (clean_name, clean_value, caption, comment),
-            (clean_name, clean_value, '', ''),
         ):
+            try:
+                signature = inspect.signature(set_parameter)
+            except (ValueError, TypeError): signature = None
+            if signature is not None:
+                try: signature.bind(*args)
+                except TypeError: continue  # Proven argument-binding failure, before any setter call.
             try:
                 set_parameter(*args)
                 refresh_modelstudio()
                 if read_back_ok():
                     return True
                 cad.emit('modelstudio_write_readback_mismatch', parameter=clean_name, expected=clean_value)
+                return False
             except Exception as exc:
                 _raise_if_cad_disconnected(exc)
                 _log_backend_error('modelstudio_write_attempt_failed', exc, {'parameter': clean_name, 'argumentCount': len(args)}, level=logging.WARNING)
+                if getattr(exc, 'hresult', None) != -2147352562:
+                    return False
                 continue
 
     # Last fallback only: direct Parameter.Value assignment. This is kept for old
@@ -2014,7 +2217,7 @@ def import_nanocad_blocks(request: NanoCadBlockImportRequest) -> dict:
             meta={
                 'source': 'nanocad_block',
                 'cadHandle': handle,
-                'cadDocument': document_path,
+                'cadDocument': document_path, 'cadDocumentGuid': _document_guid(_doc),
                 'blockName': block_name,
                 'numberParameter': request.numberAttribute or None,
                 'importBasePoint': {'x': request.baseX, 'y': request.baseY},
@@ -2030,84 +2233,34 @@ def import_nanocad_blocks(request: NanoCadBlockImportRequest) -> dict:
 @app.post('/api/nanocad/blocks/export')
 @cad.serialized
 def export_nanocad_blocks(request: NanoCadBlockExportRequest) -> dict:
-    _app, _doc, ms = _connect_nanocad()
-    snapshot = _block_cached_scan(request.scanId, _doc, request.scope) if request.scanId else None
-    if snapshot:
-        resolved_scope = snapshot['resolvedScope']
-    else:
-        ms, resolved_scope = _cad_scope(_doc, ms, request.scope)
-    block_name = request.blockName.strip()
-    attr_name = request.numberAttribute.strip()
-    if not block_name:
-        raise HTTPException(status_code=400, detail='Не задано имя блока')
-    if not attr_name:
-        raise HTTPException(status_code=400, detail='Не задан атрибут номера')
-
-    source_points = _filter_export_points(request.points, request.selectedGroupIds)
-    used: set[int] = set()
-    updated = 0
-    matched = 0
-    missing_attribute = 0
-    scanned = 0
-    unmatched_blocks: list[dict] = []
-
-    for entity in (snapshot['objects'] if snapshot else cad.entities(ms)):
+    _app, doc, ms = _connect_nanocad()
+    snapshot = _block_cached_scan(request.scanId, doc, request.scope) if request.scanId else None
+    if snapshot: resolved_scope = snapshot['resolvedScope']
+    else: ms, resolved_scope = _cad_scope(doc, ms, request.scope)
+    block_name, attr_name = request.blockName.strip(), request.numberAttribute.strip()
+    if not block_name or not attr_name: raise HTTPException(400, 'Укажите имя блока и атрибут номера.')
+    all_points = _filter_export_points(request.points, request.selectedGroupIds)
+    source_points = [point for point in all_points if _export_number_text(point) is not None]
+    records = []
+    for candidate in (snapshot['objects'] if snapshot else cad.entities(ms)):
         cad.check_cancelled()
-        if snapshot:
-            name = entity['name']
-            insertion = entity['insertion']
-        else:
-            if not _is_block_reference(entity):
-                continue
-            name = _block_name(entity)
-            insertion = _coerce_float_triplet(getattr(entity, 'InsertionPoint', None))
-        if name != block_name:
-            continue
-        if insertion is None:
-            continue
-        scanned += 1
-        x, y, _z = insertion
-        found = _find_nearest_export_point(x, y, source_points, used, request.baseX, request.baseY, request.tolerance)
-        if found is None:
-            if len(unmatched_blocks) < 20:
-                unmatched_blocks.append({'x': x, 'y': y})
-            continue
-        index, point, dist = found
-        used.add(index)
-        matched += 1
-        value = _export_number_text(point)
-        if value is None:
-            continue
-        if snapshot:
-            record_handle = entity['handle']
-            try:
-                entity = _doc.HandleToObject(record_handle)
-                if not _is_block_reference(entity) or _block_name(entity) != block_name:
-                    raise ValueError('Тип блока изменился после скана')
-            except Exception as exc:
-                _raise_if_cad_disconnected(exc)
-                missing_attribute += 1
-                cad.emit('block_snapshot_handle_not_found', handle=record_handle, error=str(exc))
-                continue
-        if _set_block_attribute(entity, attr_name, value):
-            updated += 1
-        else:
-            missing_attribute += 1
-
-    if updated and request.scanId:
-        _BLOCK_SCAN_CACHE.pop(request.scanId, None)
-
-    return {
-        'updated': updated,
-        'matched': matched,
-        'scanned': scanned,
-        'points': len(source_points),
-        'unmatchedBlocks': unmatched_blocks,
-        'unusedPoints': max(0, len(source_points) - len(used)),
-        'missingAttribute': missing_attribute,
-        'tolerance': request.tolerance,
-        'reusedScan': bool(snapshot),
-    }
+        record = _live_export_record(doc, candidate, 'block', request.tolerance)
+        if record and record['name'] == block_name: records.append(record)
+    plan = _coordinate_export_plan(records, source_points, request.baseX, request.baseY, request.tolerance)
+    updated = failed = 0
+    for record, (index, point, distance) in plan:
+        cad.check_cancelled()
+        _invalidate_scan_caches()
+        live = _live_export_record(doc, record['entity'], 'block', request.tolerance)
+        if not live or live['name'] != block_name or not live['insertion'] or math.hypot(live['insertion'][0]-point.x-request.baseX, live['insertion'][1]-point.y-request.baseY) > request.tolerance:
+            raise HTTPException(409, 'Объект изменился до записи. Повторите сканирование.')
+        success = _set_block_attribute(live['entity'], attr_name, _export_number_text(point))
+        updated += int(success); failed += int(not success)
+        cad.update_counts(updated=updated, failed=failed, matched=len(plan), completed=updated+failed)
+    return {'updated': updated, 'matched': len(plan), 'scanned': len(records), 'points': len(all_points),
+            'skippedUnnumbered': len(all_points)-len(source_points), 'unmatchedBlocks': [],
+            'unusedPoints': len(source_points)-len(plan), 'missingAttribute': failed,
+            'tolerance': request.tolerance, 'reusedScan': bool(snapshot)}
 
 
 @app.get('/api/nanocad/modelstudio/scan')
@@ -2327,7 +2480,7 @@ def import_modelstudio_objects(request: NanoCadModelStudioImportRequest) -> dict
             points.append(_modelstudio_import_point(
                 name=name, api_type=api_type, handle=handle, insertion=insertion,
                 document_path=document_path, number_parameter=number_parameter,
-                source_number=source_number, params=params, request=request, ordinal=len(points) + 1,
+                source_number=source_number, params=params, request=request, ordinal=len(points) + 1, document_guid=_document_guid(_doc),
             ))
         except HTTPException:
             raise
@@ -2423,7 +2576,8 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
         resolved_scope = snapshot['resolvedScope']
     else:
         ms, resolved_scope = _cad_scope(doc, ms, request.scope)
-    source_points = _filter_export_points(request.points, request.selectedGroupIds)
+    all_source_points = _filter_export_points(request.points, request.selectedGroupIds)
+    source_points = [p for p in all_source_points if _export_number_text(p) is not None]
     allowed_names = _modelstudio_allowed_names(request.objectName, request.selectedObjectNames)
     document_path = str(getattr(doc, 'FullName', '') or '')
     cad.emit('modelstudio_export_document', document=document_path, mode=request.matchMode,
@@ -2433,6 +2587,11 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
     updated = matched = scanned = failed = skipped_no_coordinates = unresolved = 0
     failures = []
     unmatched_objects = []
+
+    if request.matchMode in ('auto', 'handles'):
+        for point in source_points:
+            if point.meta.get('cadHandle'):
+                _verify_document_binding(doc, point.meta.get('cadDocument'), point.meta.get('cadDocumentGuid'))
 
     if request.matchMode == 'auto':
         keys = [str(p.meta.get('cadDocument', '')).casefold() + ':' + str(p.meta['cadHandle']).upper()
@@ -2490,7 +2649,7 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
                 direct_handles.add(handle)
                 yield entity, (index, point, 0)
             cad.progress('Проверка сохранённых handle и запись номеров', len(source_points), len(source_points), updated=updated, failed=failed)
-        if request.matchMode == 'coordinates' or (request.matchMode == 'auto' and len(used) < len(source_points)):
+        if request.matchMode == 'coordinates' or (request.matchMode == 'auto' and len(direct_handles) < len(source_points)):
             cad.emit('modelstudio_coordinate_scan_started', remainingPoints=len(source_points) - len(used))
             candidates = snapshot['objects'] if snapshot else cad.entities(ms)
             for entity in candidates:
@@ -2499,39 +2658,28 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
                     continue
                 yield entity, None
 
-    for entity, direct in targets():
+    target_items = list(targets())
+    direct_items = [(entity, found) for entity, found in target_items if found is not None]
+    direct_indices = {found[0] for entity, found in direct_items}
+    records = []
+    for candidate, found in target_items:
+        if found is not None: continue
+        record = _live_export_record(doc, candidate, 'model_studio', request.tolerance)
+        if record and (not allowed_names or record['name'] in allowed_names): records.append(record)
+    coordinate_items = _coordinate_export_plan(records, source_points, request.baseX, request.baseY, request.tolerance, direct_indices)
+    coordinate_indices = {found[0] for record, found in coordinate_items}
+    prepared = direct_items + [(record['entity'], found) for record, found in coordinate_items]
+    scanned = len(direct_items) + len(records)
+    skipped_no_coordinates = sum(record['insertion'] is None for record in records)
+    for entity, direct in prepared:
         cad.check_cancelled()
-        cached_record = entity if snapshot and direct is None else None
-        if cached_record:
-            name = cached_record['name']
-        else:
-            if not _has_modelstudio_element(entity):
-                continue
-            name = _modelstudio_name(entity)
-        if allowed_names and name not in allowed_names:
-            continue
-        scanned += 1
-        if direct is not None:
-            found = direct
-            expected_name = str(direct[1].meta.get('objectName') or '')
-            if expected_name and expected_name != name:
-                unresolved += 1
-                continue
-        else:
-            insertion = cached_record['insertion'] if cached_record else _entity_insertion_point(entity)
-            if insertion is None:
-                skipped_no_coordinates += 1
-                continue
-            x, y, _z = insertion
-            # A coordinate coincidence must not bind a pile to a different MS type.
-            excluded = used | {i for i, p in enumerate(source_points)
-                               if p.meta.get('objectName') and str(p.meta['objectName']) != name}
-            found = _find_nearest_export_point(x, y, source_points, excluded, request.baseX, request.baseY, request.tolerance)
-            if found is None:
-                if len(unmatched_objects) < 20:
-                    unmatched_objects.append({'objectName': name, 'x': x, 'y': y})
-                continue
-        index, point, _dist = found
+        if not _has_modelstudio_element(entity):
+            raise HTTPException(409, 'Тип объекта изменился до записи.')
+        name = _modelstudio_name(entity)
+        index, point, _dist = direct
+        expected_name = str(point.meta.get('objectName') or '')
+        if (expected_name and expected_name != name) or (allowed_names and name not in allowed_names):
+            raise HTTPException(409, 'Тип объекта изменился до записи.')
         used.add(index)
         matched += 1
         value = _export_number_text(point)
@@ -2547,24 +2695,17 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
                 failures.append({'pointId': point.id, 'objectName': name, 'error': 'Не задан параметр номера'})
             cad.emit('modelstudio_write_parameter_missing', pointId=point.id, objectName=name)
             continue
-        if cached_record:
-            handle = cached_record['handle']
-            if not handle:
-                failed += 1
-                continue
-            try:
-                entity = doc.HandleToObject(handle)
-                if not _has_modelstudio_element(entity) or _modelstudio_name(entity) != name:
-                    raise ValueError('Тип объекта изменился после сканирования')
-            except Exception as exc:
-                _raise_if_cad_disconnected(exc)
-                failed += 1
-                cad.emit('modelstudio_snapshot_handle_not_found', handle=handle, error=str(exc))
-                continue
+        _invalidate_scan_caches()
+        if index in coordinate_indices:
+            live = _live_export_record(doc, entity, 'model_studio', request.tolerance)
+            if not live or live['name'] != name or not live['insertion'] or math.hypot(live['insertion'][0]-point.x-request.baseX, live['insertion'][1]-point.y-request.baseY) > request.tolerance:
+                raise HTTPException(409, 'Объект изменился до записи. Повторите сканирование.')
+            entity = live['entity']
         handle = str(getattr(entity, 'Handle', '') or '')
         try:
             success = _set_modelstudio_parameter(entity, parameter_name, value)
         except Exception as exc:
+            cad.update_counts(updated=updated, failed=failed+1, matched=matched, unverifiedWrites=1, completed=updated+failed)
             _raise_if_cad_disconnected(exc)
             success = False
             _log_backend_error('modelstudio_export_entity_error', exc, {'pointId': point.id, 'handle': handle})
@@ -2574,6 +2715,7 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
             failed += 1
             if len(failures) < 20:
                 failures.append({'pointId': point.id, 'handle': handle, 'parameter': parameter_name})
+        cad.update_counts(updated=updated, failed=failed, matched=matched, completed=updated+failed)
         cad.emit('modelstudio_write_result', pointId=point.id, handle=handle, parameter=parameter_name, value=value, verified=success)
     saved = False
     save_error = None
@@ -2596,7 +2738,7 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
             except Exception as exc:
                 save_error = str(exc)
                 _log_backend_error('modelstudio_drawing_save_failed', exc, {'document': document_path, 'updated': updated})
-    return {'updated': updated, 'matched': matched, 'scanned': scanned, 'points': len(source_points),
+    return {'updated': updated, 'matched': matched, 'scanned': scanned, 'points': len(all_source_points), 'skippedUnnumbered': len(all_source_points)-len(source_points),
             'unusedPoints': len(source_points) - len(used), 'missingParameter': failed, 'failedWrites': failed,
             'unresolvedHandles': unresolved, 'failures': failures, 'tolerance': request.tolerance,
             'selectedObjectNames': sorted(allowed_names), 'skippedNoCoordinates': skipped_no_coordinates,

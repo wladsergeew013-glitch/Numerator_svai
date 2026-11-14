@@ -3,7 +3,8 @@ import type { PilePoint } from '../types/project';
 export function cadPointIdentity(point: PilePoint): string | null {
   const handle = String(point.meta?.cadHandle ?? '').trim().toUpperCase();
   const document = String(point.meta?.cadDocument ?? '').trim().replace(/\\/g, '/').toLowerCase();
-  return handle && document ? `${document}:${handle}` : null;
+  const guid = String(point.meta?.cadDocumentGuid ?? '').toLowerCase();
+  return handle && document ? `${document}:${guid}:${handle}` : null;
 }
 
 export interface CadImportReconciliation {
@@ -35,6 +36,7 @@ export function reconcileCadImport(existing: PilePoint[], incoming: PilePoint[],
   let unchanged = 0;
   const seen = new Set<string>();
   const claimedWithoutHandle = new Set<string>();
+  const claimedExisting = new Set<string>();
   const withImportedNumber = (current: PilePoint, imported: PilePoint): PilePoint => {
     if (!overwriteNumbers || current.locked || (current.groupId && lockedGroupIds.has(current.groupId)) ||
       typeof imported.number !== 'number' || !Number.isSafeInteger(imported.number)) return current;
@@ -49,28 +51,36 @@ export function reconcileCadImport(existing: PilePoint[], incoming: PilePoint[],
     if (key) {
       if (seen.has(key)) { unchanged++; continue; }
       seen.add(key);
-      const current = byHandle.get(key);
+      // Explicit re-import migrates a legacy path+handle binding to a GUID.
+      const legacy = existing.find(candidate => !claimedExisting.has(candidate.id) && !candidate.meta?.cadDocumentGuid &&
+        String(candidate.meta?.cadHandle ?? '').toUpperCase() === String(point.meta?.cadHandle ?? '').toUpperCase() &&
+        String(candidate.meta?.cadDocument ?? '').replace(/\\/g, '/').toLowerCase() === String(point.meta?.cadDocument ?? '').replace(/\\/g, '/').toLowerCase());
+      const foundCurrent = byHandle.get(key) ?? legacy;
+      const current = foundCurrent && !claimedExisting.has(foundCurrent.id) ? foundCurrent : undefined;
       if (current) {
+        claimedExisting.add(current.id);
         if (Math.hypot(current.x - point.x, current.y - point.y) > tolerance) {
           moved.push(withImportedNumber({ ...current, x: point.x, y: point.y, syncState: 'moved',
             meta: { ...current.meta, ...point.meta } }, point));
-        } else if (point.meta?.numberParameter && current.meta?.numberParameter !== point.meta.numberParameter) {
+        } else if ((point.meta?.numberParameter && current.meta?.numberParameter !== point.meta.numberParameter) || point.meta?.cadDocumentGuid !== current.meta?.cadDocumentGuid) {
           linked.push(withImportedNumber({ ...current, meta: { ...current.meta, ...point.meta } }, point));
         } else if (withImportedNumber(current, point) === current) unchanged++;
         continue;
       }
       const coordinateMatch = withoutHandle.find(candidate =>
+        !claimedExisting.has(candidate.id) &&
         !claimedWithoutHandle.has(candidate.id) &&
         Math.hypot(candidate.x - point.x, candidate.y - point.y) <= tolerance);
       if (coordinateMatch) {
         const updated = withImportedNumber({ ...coordinateMatch, meta: { ...coordinateMatch.meta, ...point.meta } }, point);
         claimedWithoutHandle.add(coordinateMatch.id);
+        claimedExisting.add(coordinateMatch.id);
         byHandle.set(key, updated);
         linked.push(updated);
         continue;
       }
     }
-    const comparable = key ? withoutHandle : [...existing, ...added];
+    const comparable = key ? withoutHandle.filter(p => !claimedWithoutHandle.has(p.id)) : [...existing, ...added];
     const duplicates = comparable.filter(current => {
       const other = cadPointIdentity(current);
       return (!key || !other) && Math.hypot(current.x - point.x, current.y - point.y) <= tolerance;

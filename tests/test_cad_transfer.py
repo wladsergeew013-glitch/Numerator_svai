@@ -52,6 +52,12 @@ class Document:
     FullName = 'C:/model.dwg'
     Name = 'model.dwg'
 
+    guid = '11111111-1111-4111-8111-111111111111'
+
+    def GetVariable(self, name):
+        assert name == 'FINGERPRINTGUID'
+        return self.guid
+
     def __init__(self, objects, selected=()):
         self.ModelSpace = Collection(objects)
         self.PickfirstSelectionSet = Collection(list(selected))
@@ -93,7 +99,7 @@ class WideParameters(Parameters):
 
 def point(id, x, handle=None, document=Document.FullName):
     return {'id': id, 'x': x, 'y': 0, 'number': 7,
-            'meta': {'cadHandle': handle, 'cadDocument': document, 'objectName': 'Pile'} if handle else {}}
+            'meta': {'cadHandle': handle, 'cadDocument': document, 'cadDocumentGuid': Document.guid, 'objectName': 'Pile'} if handle else {}}
 
 
 class TransferTests(unittest.TestCase):
@@ -154,13 +160,13 @@ class TransferTests(unittest.TestCase):
         doc = Document([first, second, third])
         records = [
             api.NanoCadExportPoint(id='first', x=0, y=0, number=11,
-                                   meta={'cadHandle': 'A', 'cadDocument': doc.FullName,
+                                   meta={'cadHandle': 'A', 'cadDocument': doc.FullName, 'cadDocumentGuid': doc.guid,
                                          'objectName': 'Pile', 'numberParameter': 'NUMBER'}),
             api.NanoCadExportPoint(id='second', x=10, y=0, number=12,
-                                   meta={'cadHandle': 'B', 'cadDocument': doc.FullName,
+                                   meta={'cadHandle': 'B', 'cadDocument': doc.FullName, 'cadDocumentGuid': doc.guid,
                                          'objectName': 'OtherPile', 'numberParameter': 'ALT_NUMBER'}),
             api.NanoCadExportPoint(id='third', x=20, y=0, number=13,
-                                   meta={'cadHandle': 'C', 'cadDocument': doc.FullName,
+                                   meta={'cadHandle': 'C', 'cadDocument': doc.FullName, 'cadDocumentGuid': doc.guid,
                                          'objectName': 'OtherPile'}),
         ]
         with patch.object(api, '_connect_nanocad', return_value=(None, doc, doc.ModelSpace)):
@@ -176,7 +182,7 @@ class TransferTests(unittest.TestCase):
         item = entity('AB', 10)
         item.Element.Parameters.Item('NUMBER').Value = '42'
         doc = Document([item])
-        request = api.NanoCadPointActionRequest(action='read', handle='AB', documentPath=doc.FullName,
+        request = api.NanoCadPointActionRequest(action='read', handle='AB', documentPath=doc.FullName, documentGuid=doc.guid,
                                                  objectName='Pile', parameterName='NUMBER')
         with patch.object(api, '_connect_nanocad', return_value=(None, doc, doc.ModelSpace)):
             read = api.act_on_nanocad_point(request)
@@ -294,7 +300,7 @@ class TransferTests(unittest.TestCase):
     def test_select_in_original_drawing_uses_lisp_handle_and_checks_document(self):
         item = entity('AB', 10)
         doc = Document([item])
-        request = api.NanoCadSelectHandleRequest(handle='ab', documentPath=doc.FullName, objectName='Pile')
+        request = api.NanoCadSelectHandleRequest(handle='ab', documentPath=doc.FullName, documentGuid=doc.guid, objectName='Pile')
         with patch.object(api, '_connect_nanocad', return_value=(None, doc, doc.ModelSpace)):
             result = api.select_nanocad_object_by_handle(request)
             self.assertTrue(result['selected'])

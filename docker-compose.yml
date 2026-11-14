@@ -2,17 +2,24 @@ services:
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    environment:
+      - PILE_NUMBERING_DATA_DIR=/data
+      - PILE_NUMBERING_TRUST_CONTAINER_PEERS=1
     volumes:
+      - pile_data:/data
       - ./backend/app:/app/app
 
   frontend:
     build: ./frontend
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     environment:
       - VITE_API_BASE=http://localhost:8000
     volumes:
       - ./frontend/src:/app/src
     depends_on:
       - backend
+
+volumes:
+  pile_data:

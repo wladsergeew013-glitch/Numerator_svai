@@ -1,9 +1,12 @@
+import { parseSafeInteger } from '../utils/validation';
+import { capturePointContext, isPointContextCurrent, type PointContext } from '../utils/pointContext';
+import { pointVisibility } from '../utils/pointVisibility';
 import { cadAxisPlacement } from '../utils/cadAxes';
 import { workspaceKeyboardBlocked } from '../utils/workspaceKeyboard';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Arrow, Circle, Group, Layer, Line, Rect, Stage, Text } from 'react-konva';
 import { KonvaEventObject } from 'konva/lib/Node';
-import { buildPreviewOrderForGroup, buildGroupFlow, buildNumberingOrder, useProjectStore } from '../store/useProjectStore';
+import { buildPreviewOrderForGroup, buildGroupFlow, buildNumberingOrder, isManualLinkTargetAllowed, useProjectStore } from '../store/useProjectStore';
 
 interface Props {
   width: number;
@@ -971,7 +974,7 @@ function connectOutlineRects(rects: OutlineRectWorld[], bridgeHalfWidth: number)
   const connectors: OutlineRectWorld[] = [];
 
   for (const rect of sorted.slice(1)) {
-    if (connected.some((item) => outlineRectsTouch(item, rect, bridgeHalfWidth * 0.15))) {
+    if (connected.some((item) => outlineRectsTouch(item, rect, -1e-6))) {
       connected.push(rect);
       continue;
     }
@@ -1332,7 +1335,8 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
   const [vectorExtendState, setVectorExtendState] = useState<VectorExtendState | null>(null);
   const [vectorExtendHoverPoint, setVectorExtendHoverPoint] = useState<VectorHoverPoint | null>(null);
   const [vectorPointerDown, setVectorPointerDown] = useState(false);
-  const [pointEditDialog, setPointEditDialog] = useState<{ pointId: string; value: string } | null>(null);
+  const [pointEditError, setPointEditError] = useState('');
+  const [pointEditDialog, setPointEditDialog] = useState<(PointContext & { value: string }) | null>(null);
 
   useEffect(() => {
     if (!groupOutlineDrawMode) {
@@ -1502,12 +1506,15 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     return pos ? { x: pos.x, y: pos.y } : null;
   };
 
+  const isPointPickable = useMemo(() => pointVisibility(project.groups), [project.groups]);
   const findNearestPoint = (screenPos: ScreenPoint, maxDistancePx?: number) => {
     if (!project.points.length) return null;
     let nearest: { id: string; x: number; y: number; groupId?: string | null } | null = null;
     let best = Number.POSITIVE_INFINITY;
 
     for (const point of project.points) {
+      if (!isPointPickable(point)) continue;
+      if ((numberingPickMode === 'group_start' || numberingPickMode === 'group_end') && point.groupId !== selectedGroupId) continue;
       const sp = worldToScreen(point.x, point.y);
       const d = distance2(sp, screenPos);
       if (d < best) {
@@ -1591,6 +1598,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
   };
 
   const getIdsInRect = (rect: SelectionRectState) => project.points
+    .filter(isPointPickable)
     .filter((p) => rectContains(rect, worldToScreen(p.x, p.y)))
     .map((p) => p.id);
 
@@ -1859,12 +1867,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
 
   const isManualTargetAllowedOnCanvas = (fromId: string | null, toId: string | null) => {
     if (!fromId || !toId || fromId === toId) return false;
-    const source = project.points.find((p) => p.id === fromId);
-    const target = project.points.find((p) => p.id === toId);
-    if (!source || !target || !activeNumberingGroup || source.groupId !== activeNumberingGroup.id || target.groupId !== activeNumberingGroup.id) return false;
-    const fromIndex = previewRouteIndexById.get(fromId);
-    const toIndex = previewRouteIndexById.get(toId);
-    return typeof fromIndex === 'number' && typeof toIndex === 'number' && toIndex > fromIndex;
+    return Boolean(activeNumberingGroup && isManualLinkTargetAllowed(project, activeNumberingGroup, fromId, toId));
   };
 
   const focusedManualLink = Boolean(numberingPickMode === 'manual_link_target' && numberingLinkFromId);
@@ -2185,7 +2188,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     }
   };
 
-  const onMouseUp = () => {
+  const onMouseUp = (event?: KonvaEventObject<MouseEvent>) => {
     const pos = pointer();
 
     if (panStart) {
@@ -2221,8 +2224,9 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
       if (selectionRect && selectionRect.w > 3 && selectionRect.h > 3 && editPointPickMode === 'props_target') {
         const ids = getIdsInRect(selectionRect).filter((id) => id !== propertySourcePointId);
         if (ids.length > 0) {
-          setSelection(ids);
-          if (propertySourcePointId) copyGroupPropertyToTargets(propertySourcePointId, ids);
+          const additive = Boolean(event?.evt.ctrlKey || event?.evt.shiftKey);
+          setSelection(additive ? Array.from(new Set([...selectedPointIds, ...ids])) : ids);
+          if (propertySourcePointId && !additive) copyGroupPropertyToTargets(propertySourcePointId, ids);
         }
       } else if (pos) {
         const nearest = findNearestPoint(pos);
@@ -2257,6 +2261,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     }
 
     const ids = project.points
+      .filter(isPointPickable)
       .filter((p) => {
         const sp = worldToScreen(p.x, p.y);
         return sp.x >= x && sp.x <= x + w && sp.y >= y && sp.y <= y + h;
@@ -2278,26 +2283,36 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
   };
 
   const onPointMouseDown = (e: KonvaEventObject<MouseEvent>, pointId: string) => {
-    if (!editPointPickMode && !numberingPickMode && !vectorPathDrawMode) return;
+    if (e.evt.button !== 0) return;
+    if (!editPointPickMode && !numberingPickMode && !vectorPathDrawMode && !groupOutlineDrawMode) return;
     e.cancelBubble = true;
     setManualLinkDraft(null);
     const point = project.points.find((p) => p.id === pointId);
     if (!point) return;
-    if (vectorPathDrawMode) {
-      addVectorPathDraftPoint({ x: point.x, y: point.y });
-      setVectorHoverPoint({ point: { x: point.x, y: point.y }, screen: worldToScreen(point.x, point.y), kind: 'free' });
+    if (groupOutlineDrawMode) {
+      addGroupOutlineDraftPoint(resolveGroupOutlineSnap(worldToScreen(point.x, point.y), point, e.evt.shiftKey).point);
       return;
+    }
+    if (vectorPathDrawMode) {
+      const resolved = resolveVectorDraftPoint(point, e.evt.shiftKey);
+      addVectorPathDraftPoint(resolved.point);
+      setVectorHoverPoint(resolved);
+      return;
+    }
+    if (editPointPickMode === 'props_target' && (e.evt.ctrlKey || e.evt.shiftKey)) {
+      togglePointSelection(point.id, true, false); return;
     }
     if (editPointPickMode) handleCanvasEditPoint({ x: point.x, y: point.y }, point.id);
     else if (numberingPickMode) handleNumberingPickPoint(point.id);
   };
 
   const onPointClick = (e: KonvaEventObject<MouseEvent>, pointId: string) => {
+    if (e.evt.button !== 0) return;
     e.cancelBubble = true;
     const point = project.points.find((p) => p.id === pointId);
     if (!point) return;
 
-    if (editPointPickMode || numberingPickMode || vectorPathDrawMode || vectorPathEditMode) return;
+    if (editPointPickMode || numberingPickMode || vectorPathDrawMode || vectorPathEditMode || groupOutlineDrawMode) return;
 
     if (point.groupId) {
       setSelectedGroup(point.groupId);
@@ -2318,7 +2333,8 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     if (point.locked || group?.locked) return;
     setSelection([pointId]);
     if (point.groupId) setSelectedGroup(point.groupId);
-    setPointEditDialog({ pointId, value: point.number != null ? String(point.number) : '' });
+    setPointEditError('');
+    setPointEditDialog({ ...capturePointContext(useProjectStore.getState().projectSessionId, point), value: point.number != null ? String(point.number) : '' });
   };
 
   const clearContextMenu = (e: KonvaEventObject<PointerEvent>) => {
@@ -2537,6 +2553,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
       }}
       tabIndex={0}
       onKeyDownCapture={(event) => {
+        if (workspaceKeyboardBlocked(event.nativeEvent)) return;
         if (!groupOutlineDrawMode && !vectorPathDrawMode && !vectorPathEditMode) return;
         const isEscape = event.key === 'Escape' || event.key === 'Esc';
         const isEnter = event.key === 'Enter';
@@ -3096,7 +3113,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
                     <Text
                       x={manualLinkDraft.screen.x + 12}
                       y={manualLinkDraft.screen.y - 28}
-                      text={manualLinkDraft.targetId ? (manualLinkDraft.allowed ? 'Новая конечная точка' : 'Назад нельзя') : 'Тяни к точке'}
+                      text={manualLinkDraft.targetId ? (manualLinkDraft.allowed ? 'Новая конечная точка' : 'Связь нарушает маршрут или закреплённый финиш') : 'Тяни к точке'}
                       fill={color}
                       stroke="#020617"
                       strokeWidth={1.2}
@@ -3197,7 +3214,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
             const sp = worldToScreen(p.x, p.y);
             if (sp.x < -180 || sp.x > width + 180 || sp.y < -180 || sp.y > height + 180) return null;
             const group = groupById.get(p.groupId ?? '');
-            if (group?.visible === false) return null;
+            if (!isPointPickable(p)) return null;
             const fill = group?.color || '#d1d5db';
             const selected = selectedIds.has(p.id);
             const focusedPoint = focusedPointIds.has(p.id);
@@ -3451,25 +3468,27 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
       {pointEditDialog && (() => {
         const point = project.points.find((p) => p.id === pointEditDialog.pointId);
         const group = point?.groupId ? project.groups.find((g) => g.id === point.groupId) : null;
-        if (!point || point.locked || group?.locked) return null;
+        if (!point || point.locked || group?.locked || !isPointContextCurrent(pointEditDialog, useProjectStore.getState())) return null;
         const screen = worldToScreen(point.x, point.y);
         const left = Math.min(Math.max(screen.x + 18, 16), Math.max(16, width - 286));
         const top = Math.min(Math.max(screen.y - 18, 16), Math.max(16, height - 182));
         const save = () => {
-          const value = Number(pointEditDialog.value.trim().replace(',', '.'));
-          if (!Number.isFinite(value)) return;
-          setPointManualNumber(point.id, Math.round(value));
-          setPointEditDialog(null);
+          if (!isPointContextCurrent(pointEditDialog, useProjectStore.getState())) { setPointEditDialog(null); return; }
+          try {
+            setPointManualNumber(point.id, parseSafeInteger(pointEditDialog.value));
+            setPointEditDialog(null);
+          } catch (error) { setPointEditError(error instanceof Error ? error.message : String(error)); }
         };
         return (
           <div className="point-edit-popover" style={{ left, top }} onMouseDown={(event) => event.stopPropagation()}>
+            {pointEditError && <div role="alert">{pointEditError}</div>}
             <div className="point-edit-title">Точка {point.number ?? point.sourceNumber ?? ''}</div>
             <label className="point-edit-field">
               Ручной номер
               <input
                 autoFocus
                 value={pointEditDialog.value}
-                onChange={(event) => setPointEditDialog({ pointId: point.id, value: event.target.value })}
+                onChange={(event) => setPointEditDialog({ ...pointEditDialog, value: event.target.value })}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') save();
                   if (event.key === 'Escape') setPointEditDialog(null);

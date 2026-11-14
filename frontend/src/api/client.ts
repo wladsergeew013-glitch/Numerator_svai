@@ -1,4 +1,5 @@
 import { LocalProjectInfo, RecentProjectInfo, NumberingSettings, PileGroup, PilePoint, PileProject } from '../types/project';
+import { queueProjectSave } from '../utils/projectSaves';
 import type { ClusterOptions, ClusterPreview } from '../types/clustering';
 
 // The packaged desktop UI is served by its own backend on a free port.
@@ -50,8 +51,26 @@ function apiError(status: number, text: string): Error {
   return new Error(message);
 }
 
+let session: Promise<string> | null = null;
+async function sessionToken(): Promise<string> {
+  if (!session) session = fetch(`${API_BASE}/api/session`, { method: 'POST', credentials: 'include', headers: { 'X-Pile-Client': '1' } })
+    .then(async response => {
+      if (!response.ok) throw apiError(response.status, await response.text());
+      const data = await response.json();
+      if (typeof data.token !== 'string' || !data.token) throw new Error('Не получен ключ локальной сессии.');
+      return data.token;
+    }).catch(error => { session = null; throw error; });
+  return session;
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${url}`, init);
+  const headers = new Headers(init?.headers);
+  headers.set('X-Pile-Token', await sessionToken());
+  let response = await fetch(`${API_BASE}${url}`, { ...init, credentials: 'include', headers });
+  if (response.status === 401) {
+    session = null; headers.set('X-Pile-Token', await sessionToken());
+    response = await fetch(`${API_BASE}${url}`, { ...init, credentials: 'include', headers });
+  }
   if (!response.ok) {
     const text = await response.text();
     throw apiError(response.status, text);
@@ -90,11 +109,12 @@ export async function listLocalProjects(): Promise<LocalProjectInfo[]> {
 }
 
 export async function saveLocalProject(project: PileProject): Promise<{ saved: boolean; fileName: string; name: string }> {
-  return request<{ saved: boolean; fileName: string; name: string }>('/api/projects/local/save', {
+  const snapshot = JSON.stringify(project);
+  return queueProjectSave(project.project.id, () => request<{ saved: boolean; fileName: string; name: string }>('/api/projects/local/save', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(project)
-  });
+    body: snapshot
+  }));
 }
 
 export async function openLocalProject(fileName: string): Promise<PileProject> {
@@ -114,10 +134,10 @@ export async function openLocalProjectLocation(fileName?: string): Promise<{ ope
   return request(`/api/projects/local/location${fileName ? `?fileName=${encodeURIComponent(fileName)}` : ''}`);
 }
 
-export async function selectNanoCadObjectByHandle(handle: string, documentPath: string, objectName?: string): Promise<{ selected: boolean; handle: string; documentName: string }> {
+export async function selectNanoCadObjectByHandle(handle: string, documentPath: string, objectName?: string, documentGuid?: string): Promise<{ selected: boolean; handle: string; documentName: string }> {
   return request('/api/nanocad/modelstudio/select', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ handle, documentPath, objectName })
+    body: JSON.stringify({ handle, documentPath, objectName, documentGuid })
   });
 }
 
@@ -135,14 +155,17 @@ export async function actOnNanoCadPoint(params: {
   action: 'read' | 'write' | 'position';
   handle: string;
   documentPath: string;
+  documentGuid?: string;
   objectName?: string;
   objectKind: 'model_studio' | 'block';
   parameterName?: string;
   value?: string;
 }): Promise<NanoCadPointActionResult> {
-  return request<NanoCadPointActionResult>('/api/nanocad/point/action', {
+  try { return await request<NanoCadPointActionResult>('/api/nanocad/point/action', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params)
-  });
+  }); } finally {
+    if (params.action === 'write') window.dispatchEvent(new Event('pile-numbering:cad-changed'));
+  }
 }
 export interface PanelStateConfig {
   x?: number | null;
@@ -180,12 +203,15 @@ export async function getUserConfig(): Promise<UserConfigPayload> {
   return request<UserConfigPayload>('/api/config/user');
 }
 
-export async function saveUserConfig(config: UserConfigPayload): Promise<UserConfigPayload> {
-  return request<UserConfigPayload>('/api/config/user', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(config)
-  });
+let configQueue: Promise<unknown> = Promise.resolve();
+export type UserConfigPatchPayload = Omit<UserConfigPayload, 'commandIcons'> & { commandIcons?: Record<string, string | null> };
+export function saveUserConfig(config: UserConfigPatchPayload): Promise<UserConfigPayload> {
+  const snapshot = JSON.stringify(config);
+  const operation = configQueue.then(() => request<UserConfigPayload>('/api/config/user', {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: snapshot
+  }));
+  configQueue = operation.catch(() => undefined);
+  return operation;
 }
 
 export async function autosaveProject(project: PileProject, folderPath?: string | null): Promise<{ saved: boolean; fileName: string; path: string }> {

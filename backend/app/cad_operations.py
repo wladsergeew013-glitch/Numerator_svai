@@ -15,6 +15,8 @@ _active = ContextVar('cad_operation', default=None)
 _lock = threading.Lock()
 _jobs_lock = threading.Lock()
 _jobs = {}
+_running = {}
+_stopping = threading.Event()
 log_event = None
 MAX_LOG_ENTRIES = 2000
 
@@ -27,6 +29,11 @@ def check_cancelled():
     job = _active.get()
     if job is not None and job['_cancel'].is_set():
         raise CadCancelled('Операция остановлена пользователем. Уже записанные в DWG значения могли остаться в открытом чертеже.')
+
+
+def cancellation_event():
+    job = _active.get()
+    return job['_cancel'] if job is not None else None
 
 
 def record(context, details, level=logging.INFO):
@@ -71,8 +78,11 @@ def serialized(func):
     def wrapped(*args, **kwargs):
         if _active.get() is not None:
             return func(*args, **kwargs)
+        if _stopping.is_set(): raise HTTPException(503, 'Приложение завершает обмен с CAD.')
         if not _lock.acquire(blocking=False):
             raise HTTPException(409, 'Выполняется другая операция nanoCAD. Дождитесь завершения.')
+        if _stopping.is_set():
+            _lock.release(); raise HTTPException(503, 'Приложение завершает обмен с CAD.')
         job = {'id': uuid4().hex, 'kind': func.__name__}
         try:
             return _execute(job, func, args, kwargs)
@@ -91,6 +101,14 @@ def _execute(job, func, args, kwargs):
     job['_started'] = started
     job.setdefault('startedAt', time.time())
     job.setdefault('_cancel', threading.Event())
+    if _stopping.is_set(): job['_cancel'].set()
+    with _jobs_lock:
+        job['status'] = 'running'
+        _running[job['id']] = job
+        for key in list(_jobs):
+            if len(_jobs) < 30: break
+            if _jobs[key].get('status') != 'running': del _jobs[key]
+        _jobs[job['id']] = job
     try:
         if sys.platform == 'win32':
             import pythoncom
@@ -100,14 +118,17 @@ def _execute(job, func, args, kwargs):
         progress('Подключение к nanoCAD')
         result = func(*args, **kwargs)
         check_cancelled()
+        job['status'] = 'completed'
         emit('cad_completed', kind=job['kind'], elapsedSeconds=round(time.monotonic() - started, 2),
              result={k: v for k, v in result.items() if k not in ('points', 'objects', 'blocks')} if isinstance(result, dict) else {})
         return result
     except CadCancelled:
+        job['status'] = 'cancelled'
         emit('cad_cancelled', kind=job['kind'], elapsedSeconds=round(time.monotonic() - started, 2),
              completed=job.get('completed'), total=job.get('total'), updated=job.get('updated'))
         raise
     except Exception as exc:
+        job['status'] = 'failed'
         emit('cad_failed', kind=job['kind'], error=str(exc), elapsedSeconds=round(time.monotonic() - started, 2),
              completed=job.get('completed'), total=job.get('total'))
         if isinstance(exc, HTTPException):
@@ -117,14 +138,18 @@ def _execute(job, func, args, kwargs):
     finally:
         with _jobs_lock:
             job.update(elapsedSeconds=round(time.monotonic() - started, 3), finishedAt=time.time())
+            _running.pop(job['id'], None)
         if com:
             com.CoUninitialize()
         _active.reset(token)
 
 
 def start(kind, func, *args):
+    if _stopping.is_set(): raise HTTPException(503, 'Приложение завершает обмен с CAD.')
     if not _lock.acquire(blocking=False):
         raise HTTPException(409, 'Выполняется другая операция nanoCAD. Дождитесь завершения.')
+    if _stopping.is_set():
+        _lock.release(); raise HTTPException(503, 'Приложение завершает обмен с CAD.')
     job = {'id': uuid4().hex, 'kind': kind, 'status': 'running', 'phase': 'Подключение к nanoCAD',
            'completed': 0, 'total': None, 'startedAt': time.time(), '_cancel': threading.Event()}
     with _jobs_lock:
@@ -159,6 +184,39 @@ def start(kind, func, *args):
         _lock.release()
         raise
     return {'id': job['id']}
+
+
+def update_counts(**counts):
+    job = _active.get()
+    if job is not None:
+        with _jobs_lock: job.update(counts)
+
+
+def begin_shutdown():
+    _stopping.set()
+    with _jobs_lock:
+        for job in [*_jobs.values(), *_running.values()]:
+            if job.get('status', 'running') == 'running': job['_cancel'].set()
+
+
+def is_busy():
+    from app.sdk_bridge import has_pending_requests
+    return _lock.locked() or has_pending_requests()
+
+
+def shutdown(result_path, timeout=10.0):
+    """Cancel, wait for worker/native acknowledgement, persist counts, then exit."""
+    begin_shutdown()
+    if not _lock.acquire(timeout=timeout): return False
+    _lock.release()
+    from app.sdk_bridge import await_quiescence
+    if not await_quiescence(timeout): return False
+    from app.project_files import atomic_write_project
+    with _jobs_lock:
+        records = [{k: v for k, v in job.items() if not k.startswith('_') and k != 'result'} for job in _jobs.values()]
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_project(result_path, json.dumps({'operations': records}, ensure_ascii=False, default=str))
+    return True
 
 
 def status(job_id):

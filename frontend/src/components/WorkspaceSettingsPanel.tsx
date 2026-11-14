@@ -1,3 +1,4 @@
+import { changedFields } from '../utils/configPatch';
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { DraggablePanel } from './DraggablePanel';
 import { useProjectStore } from '../store/useProjectStore';
@@ -153,11 +154,18 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
   };
 
   const saveCommandIconMap = async (next: Record<string, string>, status: string) => {
-    setCommandIcons(next);
-    window.dispatchEvent(new CustomEvent('pile-numbering:command-icons-updated', { detail: next }));
+    const patch: Record<string, string | null> = {};
+    for (const id of new Set([...Object.keys(commandIcons), ...Object.keys(next)])) {
+      if (commandIcons[id] !== next[id]) patch[id] = next[id] ?? null;
+    }
+    setCommandIcons(current => {
+      const merged = { ...current };
+      for (const [id, url] of Object.entries(patch)) { if (url === null) delete merged[id]; else merged[id] = url; }
+      window.dispatchEvent(new CustomEvent('pile-numbering:command-icons-updated', { detail: merged }));
+      return merged;
+    });
     try {
-      const config = await getUserConfig();
-      await saveUserConfig({ ...config, commandIcons: next });
+      await saveUserConfig({ commandIcons: patch });
       setIconStatus(status);
     } catch (error) {
       setIconStatus(error instanceof Error ? error.message : 'Не удалось сохранить настройки иконок');
@@ -263,11 +271,9 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
       const next = parseUiSettingsFile(parsed);
       updateGridSettings(next.gridSettings);
       updateViewSettings(next.viewSettings);
-      const config = await getUserConfig();
       await saveUserConfig({
-        ...config,
-        gridSettings: { ...(config.gridSettings ?? {}), ...next.gridSettings },
-        viewSettings: { ...(config.viewSettings ?? {}), ...next.viewSettings }
+        gridSettings: { ...next.gridSettings },
+        viewSettings: { ...next.viewSettings }
       });
       setIconStatus(`UI-настройки загружены: ${file.name}`);
     } catch (error) {
@@ -277,11 +283,11 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
 
 
   const saveAutosaveSettingsToConfig = async (next: Required<AutosaveSettingsPayload>) => {
-    setAutosaveSettings(next);
+    const patch: AutosaveSettingsPayload = changedFields({ ...next }, { ...autosaveSettings });
+    setAutosaveSettings(current => ({ ...current, ...patch }));
     try {
-      const config = await getUserConfig();
-      await saveUserConfig({ ...config, autosaveSettings: next });
-      window.dispatchEvent(new CustomEvent('pile-numbering:autosave-settings-updated', { detail: next }));
+      const saved = await saveUserConfig({ autosaveSettings: patch });
+      window.dispatchEvent(new CustomEvent('pile-numbering:autosave-settings-updated', { detail: normalizeAutosaveSettings(saved.autosaveSettings) }));
       setAutosaveStatus('Настройки автосохранения сохранены.');
     } catch (error) {
       setAutosaveStatus(error instanceof Error ? error.message : 'Не удалось сохранить автосохранение');
@@ -292,8 +298,7 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
     setNanoCadSaving(true);
     setNanoCadStatus('Сохраняю настройки подключения...');
     try {
-      const config = await getUserConfig();
-      const saved = await saveUserConfig({ ...config, nanoCadVersion: version });
+      const saved = await saveUserConfig({ nanoCadVersion: version });
       setNanoCadVersion(saved.nanoCadVersion ?? 'auto');
       setNanoCadStatus('Настройки сохранены. Выбор применяется при следующем подключении к nanoCAD.');
     } catch (error) {

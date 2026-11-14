@@ -1,3 +1,5 @@
+import { ValidatedNumberInput } from './ValidatedNumberInput';
+import { canEditStartNumber } from '../utils/numberingSpace';
 import { type SyntheticEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { suggestedAxisTolerance, useProjectStore } from '../store/useProjectStore';
 import { useShallow } from 'zustand/react/shallow';
@@ -307,32 +309,21 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
                         {clusterNumbering && (
                           <div className="field-row">
                             <label className="tooltip" data-tooltip="Индекс кластера\nЧисловой префикс итоговых номеров. По умолчанию берётся порядок группы в пайплайне.">Индекс кластера</label>
-                            <input
-                              type="number"
-                              min={1}
-                              disabled={g.locked}
-                              value={clusterPrefix}
-                              onChange={(e) => updateGroupMeta(g.id, { clusterPrefix: Number(e.target.value) || index + 1 })}
-                            />
+                            <ValidatedNumberInput label="Индекс кластера" value={clusterPrefix} integer positive disabled={g.locked} onCommit={value => updateGroupMeta(g.id, { clusterPrefix: value })} />
                           </div>
                         )}
 
-                        {(project.numberingMode === 'per_group' || g.id === firstGroupIdInActivePipeline || clusterNumbering) ? (
+                        {canEditStartNumber(project, g, firstGroupIdInActivePipeline) ? (
                           <div className="field-row">
                             <label className="tooltip" data-tooltip={project.numberingMode === 'per_group'
-                              ? (clusterNumbering ? 'Локальный старт кластера\nДля кластера обычно оставляют 1. Итоговый номер получает префикс кластера.' : 'Начальный номер группы\nВ режиме «по группам» каждая группа может иметь свой старт.')
+                              ? 'Начальный номер группы\nВ режиме «по группам» каждая обычная группа может иметь свой старт.'
                               : 'Начальный номер пайплайна\nВ сквозном режиме задаётся только у первой группы текущего пайплайна. Следующие группы продолжают нумерацию автоматически.'
                             }>Начать с №</label>
-                            <input
-                              type="number"
-                              disabled={g.locked}
-                              value={g.numbering.startNumber}
-                              onChange={(e) => updateGroupNumbering(g.id, { startNumber: Number(e.target.value) })}
-                            />
+                            <ValidatedNumberInput label="startNumber" disabled={g.locked} value={g.numbering.startNumber} integer onCommit={value => updateGroupNumbering(g.id, { startNumber: value })} />
                           </div>
                         ) : (
                           <div className="field-help compact pipeline-start-note">
-                            Старт номера берётся автоматически после предыдущей группы пайплайна.
+                            {clusterNumbering ? 'Локальная нумерация кластера всегда начинается с 1; итоговый номер получает префикс кластера.' : 'Старт номера берётся автоматически после предыдущей группы пайплайна.'}
                           </div>
                         )}
 
@@ -362,12 +353,7 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
                           <>
                             <div className="field-row">
                               <label className="tooltip" data-tooltip="Допуск рядов — максимальная разница по Y, при которой точки считаются одним рядом. Для столбцов, маршрута и вектора не используется.">Допуск по Y</label>
-                              <input
-                                type="number"
-                                disabled={g.locked}
-                                value={g.numbering.rowTolerance}
-                                onChange={(e) => updateGroupNumbering(g.id, { rowTolerance: Number(e.target.value) })}
-                              />
+                              <ValidatedNumberInput label="rowTolerance" disabled={g.locked} value={g.numbering.rowTolerance} positive onCommit={value => updateGroupNumbering(g.id, { rowTolerance: value })} />
                             </div>
 
                             <div className="field-row wide-field">
@@ -389,12 +375,7 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
                           <>
                             <div className="field-row">
                               <label className="tooltip" data-tooltip="Допуск колонок — максимальная разница по X, при которой точки считаются одной колонкой. Для рядов, маршрута и вектора не используется.">Допуск по X</label>
-                              <input
-                                type="number"
-                                disabled={g.locked}
-                                value={g.numbering.columnTolerance}
-                                onChange={(e) => updateGroupNumbering(g.id, { columnTolerance: Number(e.target.value) })}
-                              />
+                              <ValidatedNumberInput label="columnTolerance" disabled={g.locked} value={g.numbering.columnTolerance} positive onCommit={value => updateGroupNumbering(g.id, { columnTolerance: value })} />
                             </div>
 
                             <div className="field-row wide-field">
@@ -428,12 +409,7 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
                           <>
                             <div className="field-row">
                               <label className="tooltip" data-tooltip="Коридор вокруг нарисованной линии. Сейчас это мягкий допуск: он влияет на приоритет, но не выбрасывает точки и не ломает ближайший маршрут.">Допуск до вектора</label>
-                              <input
-                                type="number"
-                                disabled={g.locked}
-                                value={g.numbering.maxDistanceToPath}
-                                onChange={(e) => updateGroupNumbering(g.id, { maxDistanceToPath: Number(e.target.value) })}
-                              />
+                              <ValidatedNumberInput label="maxDistanceToPath" disabled={g.locked} value={g.numbering.maxDistanceToPath} positive onCommit={value => updateGroupNumbering(g.id, { maxDistanceToPath: value })} />
                             </div>
                             <div className="outline-tools-box wide-field">
                               <div className="outline-tools-title">Векторный маршрут</div>

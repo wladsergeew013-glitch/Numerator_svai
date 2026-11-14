@@ -4,8 +4,29 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 from uuid import uuid4
+import math
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, field_validator, model_validator
+
+SAFE_INTEGER = 2**53 - 1
+
+
+class BaseModel(PydanticBaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    @model_validator(mode='before')
+    @classmethod
+    def finite_json_numbers(cls, value):
+        def check(item, path='', depth=0):
+            if depth > 64: raise ValueError('JSON nesting exceeds 64 levels')
+            if isinstance(item, float) and not math.isfinite(item):
+                raise ValueError(f'{path or "value"}: number must be finite')
+            if isinstance(item, dict):
+                for key, child in item.items(): check(child, f'{path}.{key}', depth+1)
+            elif isinstance(item, (list, tuple)):
+                for index, child in enumerate(item): check(child, f'{path}[{index}]', depth+1)
+        check(value)
+        return value
 
 
 class SyncState(str, Enum):
@@ -53,7 +74,7 @@ class PilePoint(BaseModel):
 
     # Номер из исходной выгрузки и текущий итоговый номер.
     sourceNumber: str | int | None = None
-    number: int | None = None
+    number: int | None = Field(default=None, ge=-SAFE_INTEGER, le=SAFE_INTEGER, strict=True)
 
     groupId: str | None = None
     locked: bool = False
@@ -70,8 +91,15 @@ class NumberingManualLink(BaseModel):
 
 class NumberingSettings(BaseModel):
     method: NumberingMethod = NumberingMethod.rows
-    startNumber: int = 1
-    step: int = 1
+    startNumber: int = Field(default=1, ge=-SAFE_INTEGER, le=SAFE_INTEGER, strict=True)
+    step: int = Field(default=1, ge=-SAFE_INTEGER, le=SAFE_INTEGER, strict=True)
+
+    @field_validator('step')
+    @classmethod
+    def nonzero_step(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError('Step must not be zero')
+        return value
 
     # Для rows/columns.
     rowTolerance: float = 250.0
@@ -319,3 +347,8 @@ class UserConfig(BaseModel):
     commandIcons: dict[str, str] = Field(default_factory=dict)
     panels: dict[str, PanelStateConfig] = Field(default_factory=dict)
     autosaveSettings: AutosaveSettingsConfig = Field(default_factory=AutosaveSettingsConfig)
+
+
+class UserConfigPatch(UserConfig):
+    # A null value removes precisely one icon binding, without replacing the map.
+    commandIcons: dict[str, str | None] = Field(default_factory=dict)

@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 import json
+import os
 import runpy
 ROOT = Path(SPECPATH).resolve().parent
 from PyInstaller.utils.hooks import collect_submodules
@@ -56,6 +57,11 @@ pyz = PYZ(a.pure)
 # so a multiword name such as Segoe UI aborts the splash before it is displayed.
 splash = Splash(str(ROOT / 'tools' / 'splash.png'), binaries=a.binaries, datas=a.datas, text_pos=(32, 332), text_size=11, text_color='#b6dbf5', text_default='Загрузка программы…', always_on_top=True)
 
+selected_icon = os.environ.get('EXE_ICON') or next((str(p) for p in [ROOT/'config'/'app_icon.ico', ROOT/'dist'/'config'/'app_icon.ico', ROOT/'tools'/'app_icon.ico'] if p.is_file()), None)
+if selected_icon and not Path(selected_icon).is_file():
+    raise SystemExit('EXE_ICON does not exist: ' + selected_icon)
+print('EXE icon: ' + str(selected_icon))
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -66,7 +72,7 @@ exe = EXE(
     [],
     name='PileNumbering',
     version=version_info,
-    icon=str(ROOT / 'config' / 'app_icon.ico') if (ROOT / 'config' / 'app_icon.ico').exists() else str(ROOT / 'tools' / 'app_icon.ico'),
+    icon=selected_icon,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -51,6 +51,7 @@ function project(name){const p=createEmptyProject();p.project.name=name;p.points
 function open(p){store.getState().openProjectFromFile(p,p.project.name+'.pilenum.json');}
 function dirty(){return projectSaveSignature(store.getState().project)!==store.getState().savedProjectSignature;}
 function handler(file,name,deps,index=0){
+  deps={queueProjectSave:load('frontend/src/utils/projectSaves.ts').queueProjectSave,...deps};
   const source=ts.createSourceFile(file,fs.readFileSync(path.join(root,file),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
   const matches=[];
   function visit(node){if(ts.isVariableDeclaration(node)&&node.name.getText(source)===name)matches.push(node.initializer.getText(source));ts.forEachChild(node,visit);}
@@ -202,5 +203,22 @@ function text(node){if(typeof node==='string')return node;if(Array.isArray(node)
     }
   }
   console.log('PASS: session histories, stale saves/opens, CSV and both CAD imports, Save/Discard/Cancel and failed-save preservation.');
-  console.log('PASS: real App and Canvas shortcuts defer to dialogs and editable text; StartupScreen captures file input before await.');
+  const canvasFile='frontend/src/components/CanvasView.tsx';
+  const canvasSource=ts.createSourceFile(canvasFile,fs.readFileSync(path.join(root,canvasFile),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+  let captureText;
+  function findCapture(node){if(ts.isJsxAttribute(node)&&node.name.text==='onKeyDownCapture')captureText=node.initializer.expression.getText(canvasSource);ts.forEachChild(node,findCapture);}findCapture(canvasSource);
+  assert.ok(captureText);
+  for(const key of ['z','Enter','Escape'])for(const target of ['input','canvas']){
+    modal=false;let mutations=0;
+    const mutate=()=>mutations++;
+    const deps={workspaceKeyboardBlocked,groupOutlineDrawMode:false,vectorPathDrawMode:true,vectorPathEditMode:false,
+      undoLastVectorPathDraftPoint:mutate,finishVectorPathDrawing:mutate,cancelVectorPathDrawing:mutate};
+    const capture=new Function(...Object.keys(deps),ts.transpileModule(`return (${captureText});`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText)(...Object.values(deps));
+    const event={key,code:key==='z'?'KeyZ':key,ctrlKey:key==='z',metaKey:false,target:new HTMLElement(target),defaultPrevented:false,
+      preventDefault(){this.defaultPrevented=true;},stopPropagation(){}};
+    event.nativeEvent=event;capture(event);
+    assert.equal(mutations,target==='canvas'?1:0,`Canvas capture ${key} in ${target}`);
+    assert.equal(event.defaultPrevented,target==='canvas');
+  }
+  console.log('PASS: real App/Canvas shortcuts and Canvas capture defer to dialogs/editors; StartupScreen captures file input before await.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

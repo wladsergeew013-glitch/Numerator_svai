@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from math import hypot
 
 from app.schemas import NumberingRowsRequest, NumberingSettings, PileGroup, PilePoint
+from app.numbering_counter import number_route
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,14 @@ def _apply_start_end_preference(route: list[PilePoint], settings: NumberingSetti
             result += _distance(candidate[-1], by_id[settings.endPointId]) * 10
         return result
 
-    return min(candidates, key=score)
+    route = min(candidates, key=score)
+    start = by_id.get(settings.startPointId or '')
+    end = by_id.get(settings.endPointId or '')
+    if start:
+        route = [start] + [p for p in route if p.id != start.id]
+    if end and (not start or end.id != start.id):
+        route = [p for p in route if p.id != end.id] + [end]
+    return route
 
 
 def build_rows_order(points: list[PilePoint], settings: NumberingSettings) -> list[PilePoint]:
@@ -97,108 +105,63 @@ def build_rows_order(points: list[PilePoint], settings: NumberingSettings) -> li
     return _apply_start_end_preference(route, settings)
 
 
-def _number_route(route: list[PilePoint], settings: NumberingSettings) -> int:
-    value = settings.startNumber
-    for point in route:
-        if point.manualNumber:
-            if point.number is not None:
-                value = point.number + settings.step
-            continue
-        if point.locked:
-            continue
-        point.number = value
-        value += settings.step
-    return value
-
-
 def _next_after_existing_numbers(points: list[PilePoint], group_id: str, start: int, step: int) -> int:
     values = [p.number for p in points if p.groupId == group_id and p.number is not None]
     if not values:
         return start
-    return max(start, max(values) + step)
+    return max(start, max(values) + step) if step > 0 else min(start, min(values) + step)
 
 
 def _pipeline_id(group: PileGroup) -> str:
     return group.pipelineId or "pipeline-main"
 
 
-def _pipeline_start_number(pipeline_groups: list[PileGroup], fallback: NumberingSettings) -> int:
-    # Старт пайплайна задаёт первая группа по порядку, даже если она пока пустая.
-    return pipeline_groups[0].numbering.startNumber if pipeline_groups else fallback.startNumber
-
-
-def _effective_group_settings(points: list[PilePoint], request: NumberingRowsRequest, target_group: PileGroup) -> NumberingSettings:
-    if request.numberingMode != "global_sequential":
-        return target_group.numbering
-
-    groups = sorted(request.groups, key=lambda g: (_pipeline_id(g), g.order))
-    pipeline_groups = [g for g in groups if _pipeline_id(g) == _pipeline_id(target_group)]
-    current_start = _pipeline_start_number(pipeline_groups, request.settings)
-
-    for group in pipeline_groups:
-        if group.id == target_group.id:
-            return group.numbering.model_copy(update={"startNumber": current_start})
-
-        group_points = [p for p in points if p.groupId == group.id]
-        if not group_points:
-            continue
-        group_settings = group.numbering
-        if group.locked:
-            current_start = _next_after_existing_numbers(points, group.id, current_start, group_settings.step)
-            continue
-
-        simulated_settings = group_settings.model_copy(update={"startNumber": current_start})
-        current_start = _number_route(build_rows_order(group_points, simulated_settings), simulated_settings)
-
-    return target_group.numbering.model_copy(update={"startNumber": current_start})
-
-
 def apply_numbering_rows(request: NumberingRowsRequest) -> list[PilePoint]:
+    # Compute the whole plan on a copy; a failure never exposes partial numbering.
     points = [p.model_copy(deep=True) for p in request.points]
-    settings = request.settings
-
-    if request.groupId:
-        target_group = next((g for g in request.groups if g.id == request.groupId), None)
-        group_settings = _effective_group_settings(points, request, target_group) if target_group else settings
-        target_points = [p for p in points if p.groupId == request.groupId]
-        route = build_rows_order(target_points, group_settings)
-        _number_route(route, group_settings)
-        return points
-
-    # Number groups by independent pipelines. Old projects have pipelineId=None and
-    # therefore become one default pipeline. Locked groups keep their numbers but,
-    # in global mode, their existing max number advances the next group start.
+    original = {p.id: p for p in request.points}
     groups = sorted(request.groups, key=lambda g: (_pipeline_id(g), g.order))
-    pipeline_ids = []
+    by_group = {g.id: g for g in groups}
+    target = by_group.get(request.groupId) if request.groupId else None
+    if target and target.locked:
+        return points
+    if request.groupId and target is None:
+        selected = [p for p in points if p.groupId == request.groupId]
+        number_route(build_rows_order(selected, request.settings), request.settings)
+        return points
+    def namespace(point):
+        group = by_group.get(point.groupId)
+        return point.groupId if request.numberingMode == 'per_group' else (_pipeline_id(group) if group else 'ungrouped')
+    occupied = {}
+    for point in points:
+        group = by_group.get(point.groupId)
+        if request.groupId and target and namespace(point) != (target.id if request.numberingMode == 'per_group' else _pipeline_id(target)): continue
+        if point.number is None or not (point.locked or point.manualNumber or (group and group.locked) or (request.groupId and point.groupId != request.groupId)):
+            continue
+        reserve = occupied.setdefault(namespace(point), set())
+        if point.number in reserve:
+            raise ValueError('Conflicting fixed numbers in the same namespace')
+        reserve.add(point.number)
+    if target:
+        pipeline_groups = [g for g in groups if _pipeline_id(g) == _pipeline_id(target)]
+        groups = pipeline_groups[:pipeline_groups.index(target)+1]
+    starts = {}
     for group in groups:
-        pipeline_id = _pipeline_id(group)
-        if pipeline_id not in pipeline_ids:
-            pipeline_ids.append(pipeline_id)
-
-    last_current_start = settings.startNumber
-    for pipeline_id in pipeline_ids:
-        pipeline_groups = [g for g in groups if _pipeline_id(g) == pipeline_id]
-        current_start = _pipeline_start_number(pipeline_groups, settings)
-        for group in pipeline_groups:
-            group_settings = group.numbering or settings
-            group_points = [p for p in points if p.groupId == group.id]
-            if not group_points:
-                continue
-            if group.locked:
-                if request.numberingMode == "global_sequential":
-                    current_start = _next_after_existing_numbers(points, group.id, current_start, group_settings.step)
-                continue
-            if request.numberingMode == "global_sequential":
-                group_settings = group_settings.model_copy(update={"startNumber": current_start})
-            route = build_rows_order(group_points, group_settings)
-            next_number = _number_route(route, group_settings)
-            if request.numberingMode == "global_sequential":
-                current_start = next_number
-        last_current_start = max(last_current_start, current_start)
-
-    ungrouped = [p for p in points if not p.groupId]
-    if ungrouped:
-        ungrouped_settings = settings.model_copy(update={"startNumber": last_current_start})
-        _number_route(build_rows_order(ungrouped, ungrouped_settings), ungrouped_settings)
-
+        key = _pipeline_id(group)
+        current = starts.setdefault(key, group.numbering.startNumber)
+        members = [p for p in points if p.groupId == group.id]
+        if group.locked:
+            if request.numberingMode == 'global_sequential' and not group.meta.get('clusterNumbering'):
+                starts[key] = _next_after_existing_numbers(points, group.id, current, group.numbering.step)
+            continue
+        settings = group.numbering.model_copy(update={'startNumber': current}) if request.numberingMode == 'global_sequential' else group.numbering
+        reserve_key = group.id if request.numberingMode == 'per_group' else key
+        starts[key] = number_route(build_rows_order(members, settings), settings, occupied.setdefault(reserve_key, set()))
+    ungrouped = [p for p in points if not p.groupId or p.groupId not in by_group]
+    if ungrouped and not request.groupId:
+        settings = request.settings.model_copy(update={'startNumber': max(starts.values(), default=request.settings.startNumber)})
+        number_route(build_rows_order(ungrouped, settings), settings, occupied.setdefault('ungrouped', set()))
+    if request.groupId:
+        # Prior groups participate only in the simulation of the effective counter.
+        return [p if p.groupId == request.groupId else original[p.id].model_copy(deep=True) for p in points]
     return points

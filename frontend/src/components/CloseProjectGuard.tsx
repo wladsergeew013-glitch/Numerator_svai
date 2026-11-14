@@ -43,8 +43,10 @@ export function CloseProjectGuard() {
       return;
     }
     closing.current = true;
+    setSaving(true); setError('Завершаю активный обмен с CAD…'); setOpen(true);
     try { await api.closeConfirmed(); }
     catch (e) { closing.current = false; setError(String(e)); setOpen(true); }
+    finally { setSaving(false); }
   };
   useEffect(() => {
     let readySent = false;

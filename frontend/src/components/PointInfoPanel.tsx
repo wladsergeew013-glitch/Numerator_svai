@@ -1,10 +1,18 @@
-import { useEffect, useState } from 'react';
+import { parseSafeInteger } from '../utils/validation';
+import { useEffect, useRef, useState } from 'react';
+import { capturePointContext, isPointContextCurrent } from '../utils/pointContext';
 import { DraggablePanel } from './DraggablePanel';
 import { useProjectStore } from '../store/useProjectStore';
 import { actOnNanoCadPoint, selectNanoCadObjectByHandle } from '../api/client';
 
-export function PointInfoPanel({ toolbarHeight, statusBarHeight }: { toolbarHeight: number; statusBarHeight: number }) {
-  const { project, selectedPointIds, togglePointInfo, setPointManualNumber, clearPointManualNumber, updatePointNumberLabelOffset, syncPointFromModel } = useProjectStore();
+type PanelProps = { toolbarHeight: number; statusBarHeight: number };
+export function PointInfoPanel(props: PanelProps) {
+  const sessionId = useProjectStore(state => state.projectSessionId);
+  return <PointInfoPanelSession key={sessionId} {...props} />;
+}
+
+function PointInfoPanelSession({ toolbarHeight, statusBarHeight }: PanelProps) {
+  const { project, projectSessionId, selectedPointIds, togglePointInfo, setPointManualNumber, clearPointManualNumber, updatePointNumberLabelOffset, syncPointFromModel } = useProjectStore();
   const point = project.points.find((p) => p.id === selectedPointIds[0]);
   const group = point?.groupId ? project.groups.find((g) => g.id === point.groupId) : null;
   useEffect(() => {
@@ -17,7 +25,11 @@ export function PointInfoPanel({ toolbarHeight, statusBarHeight }: { toolbarHeig
   const [parameterChoice, setParameterChoice] = useState('');
   const [cadActionStatus, setCadActionStatus] = useState<{ title: string; message: string; elapsed?: number; error?: boolean } | null>(null);
   const [cadActionBusy, setCadActionBusy] = useState(false);
-  useEffect(() => { setCadActionStatus(null); setManualNumberValue(''); setParameterChoice(''); }, [point?.id]);
+  const actionGeneration = useRef(0);
+  useEffect(() => {
+    actionGeneration.current++; setCadActionBusy(false);
+    setCadActionStatus(null); setManualNumberValue(''); setParameterChoice('');
+  }, [point?.id, projectSessionId]);
   const cadHandle = String(point?.meta?.cadHandle ?? '').trim();
   const cadDocument = String(point?.meta?.cadDocument ?? '').trim();
   const objectKind = point?.meta?.source === 'nanocad_block' ? 'block' : 'model_studio';
@@ -32,21 +44,25 @@ export function PointInfoPanel({ toolbarHeight, statusBarHeight }: { toolbarHeig
     if (!point || !cadHandle || !cadDocument || cadActionBusy || (locked && action !== 'select')) return;
     const titles = { select: 'Выбор в модели', read: 'Чтение номера', write: 'Запись номера', position: 'Обновление координат' };
     const title = titles[action];
+    const context = capturePointContext(projectSessionId, point);
+    const ticket = ++actionGeneration.current;
     const started = performance.now();
     setCadActionBusy(true);
     setCadActionStatus({ title, message: 'Выполняется в nanoCAD…' });
     try {
       let message = '';
       if (action === 'select') {
-        const result = await selectNanoCadObjectByHandle(cadHandle, cadDocument, objectName);
+        const result = await selectNanoCadObjectByHandle(cadHandle, cadDocument, objectName, String(point.meta?.cadDocumentGuid ?? ''));
+        if (!isPointContextCurrent(context, useProjectStore.getState())) return;
         message = `Объект ${result.handle} выделен в исходном DWG.`;
       } else {
         const enteredNumber = manualNumberValue.trim();
         const value = action === 'write' ? (enteredNumber || String(point.number ?? '')) : undefined;
         if (action !== 'position' && !parameterName) throw new Error('Выберите параметр номера для этой точки.');
-        if (action === 'write' && !/^[+-]?\d+$/.test(value ?? '')) throw new Error('Для записи укажите целый номер точки.');
+        if (action === 'write') parseSafeInteger(value ?? '');
         const result = await actOnNanoCadPoint({ action, handle: cadHandle, documentPath: cadDocument,
-          objectName, objectKind, parameterName, value });
+          objectName, objectKind, parameterName, value, documentGuid: String(point.meta?.cadDocumentGuid ?? '') });
+        if (!isPointContextCurrent(context, useProjectStore.getState())) return;
         if (action === 'position') {
           if (!result.position) throw new Error('nanoCAD не вернул координаты объекта.');
           const base = point.meta?.importBasePoint;
@@ -65,24 +81,18 @@ export function PointInfoPanel({ toolbarHeight, statusBarHeight }: { toolbarHeig
             : `Номер ${result.rawNumber} записан в ${result.parameterName} и проверен. Сохраните DWG в nanoCAD.`;
         }
       }
-      setCadActionStatus({ title, message, elapsed: (performance.now() - started) / 1000 });
+      if (ticket === actionGeneration.current) setCadActionStatus({ title, message, elapsed: (performance.now() - started) / 1000 });
     } catch (error) {
-      setCadActionStatus({ title, message: error instanceof Error ? error.message : String(error),
+      if (ticket === actionGeneration.current && isPointContextCurrent(context, useProjectStore.getState())) setCadActionStatus({ title, message: error instanceof Error ? error.message : String(error),
         elapsed: (performance.now() - started) / 1000, error: true });
-    } finally { setCadActionBusy(false); }
+    } finally { if (ticket === actionGeneration.current) setCadActionBusy(false); }
   };
   const applyManualNumber = () => {
     if (!point || locked) return;
-    const text = (manualNumberValue || String(point.number ?? '')).trim();
-    if (!/^[+-]?\d+$/.test(text)) {
-      setCadActionStatus({ title: 'Номер в проекте', message: 'Введите целый номер точки.', error: true });
-      return;
-    }
-    const value = Number(text);
-    if (!Number.isSafeInteger(value)) {
-      setCadActionStatus({ title: 'Номер в проекте', message: 'Номер выходит за допустимый диапазон.', error: true });
-      return;
-    }
+    if (!isPointContextCurrent(capturePointContext(projectSessionId, point), useProjectStore.getState())) return;
+    let value: number;
+    try { value = parseSafeInteger(manualNumberValue); }
+    catch (error) { setCadActionStatus({ title: 'Номер в проекте', message: String(error), error: true }); return; }
     setPointManualNumber(point.id, value);
     setCadActionStatus({ title: 'Номер в проекте', message: `Задан ручной номер ${value}.` });
   };

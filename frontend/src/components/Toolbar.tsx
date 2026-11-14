@@ -1,3 +1,8 @@
+import { RIBBON_COMMANDS } from '../utils/commandRegistry';
+import { queueProjectSave } from '../utils/projectSaves';
+import { numberingSpace } from '../utils/numberingSpace';
+import { MAX_IMPORT_BYTES, parseCsvRecords, guessTableHeader, tableWithHeader } from '../utils/tabularImport';
+import { workerTask } from '../utils/workerTask';
 import { CommandIcon } from './CommandIcon';
 import { APP_VERSION } from '../version';
 import { CadOperationProgress } from './CadOperationProgress';
@@ -140,7 +145,7 @@ function CommandButton({ icon, label, tooltip, onClick, children, active = false
   const content = (
     <>
       {children}
-      <span className="ribbon-command-tile" aria-hidden="true"><span className="ribbon-icon"><CommandIcon icon={icon} /></span></span>
+      <span className="ribbon-command-tile" aria-hidden="true"><span className="ribbon-icon"><CommandIcon icon={icon} commandId={RIBBON_COMMANDS.find(c => c.label === label)?.id} /></span></span>
       <span className="ribbon-label">{label}</span>
     </>
   );
@@ -177,6 +182,7 @@ interface CsvPreviewData {
   fileName: string;
   delimiter: string;
   hasHeader: boolean;
+  allRows: string[][];
   columns: string[];
   rows: string[][];
   previewRows: string[][];
@@ -214,58 +220,11 @@ function safeFileName(value: string, fallback = 'project') {
   return clean || fallback;
 }
 
-function detectDelimiter(line: string) {
-  const candidates = [';', ',', '\t'];
-  return candidates
-    .map((delimiter) => ({ delimiter, count: splitCsvLine(line, delimiter).length }))
-    .sort((a, b) => b.count - a.count)[0]?.delimiter ?? ';';
-}
-
-function splitCsvLine(line: string, delimiter: string) {
-  const result: string[] = [];
-  let current = '';
-  let quoted = false;
-  for (let i = 0; i < line.length; i += 1) {
-    const char = line[i];
-    const next = line[i + 1];
-    if (char === '"') {
-      if (quoted && next === '"') {
-        current += '"';
-        i += 1;
-      } else {
-        quoted = !quoted;
-      }
-      continue;
-    }
-    if (char === delimiter && !quoted) {
-      result.push(current.trim());
-      current = '';
-      continue;
-    }
-    current += char;
-  }
-  result.push(current.trim());
-  return result;
-}
-
-function looksLikeNumber(value: string) {
-  const clean = value.trim().replace(/\s+/g, '').replace(',', '.');
-  return clean !== '' && Number.isFinite(Number(clean));
-}
-
 function parseImportNumber(value: string) {
   const clean = value.trim().replace(/\s+/g, '').replace(',', '.');
   if (!clean) return NaN;
   const parsed = Number(clean);
   return Number.isFinite(parsed) ? parsed : NaN;
-}
-
-function guessHasHeader(firstRow: string[], secondRow: string[]) {
-  if (!firstRow.length) return false;
-  const namedColumns = firstRow.filter((value) => /[a-zа-я]/i.test(value)).length;
-  const numericInFirst = firstRow.filter(looksLikeNumber).length;
-  const numericInSecond = secondRow.filter(looksLikeNumber).length;
-  return namedColumns > 0 || (numericInFirst < Math.max(1, numericInSecond) && numericInSecond >= 2);
 }
 
 function guessColumnIndex(columns: string[], patterns: RegExp[], fallback: number) {
@@ -293,47 +252,15 @@ async function readTextFile(file: File) {
 }
 
 async function buildCsvPreview(file: File): Promise<CsvPreviewData> {
-  const text = (await readTextFile(file)).replace(/^\uFEFF/, '');
-  const rawLines = text.split(/\r?\n/).filter((line) => line.trim() !== '');
-  if (rawLines.length === 0) throw new Error('CSV пустой.');
-  const delimiter = detectDelimiter(rawLines[0]);
-  const parsedRows = rawLines.map((line) => splitCsvLine(line, delimiter));
-  const width = Math.max(...parsedRows.map((row) => row.length));
-  const normalizedRows = parsedRows.map((row) => Array.from({ length: width }, (_, index) => row[index] ?? ''));
-  const hasHeader = guessHasHeader(normalizedRows[0] ?? [], normalizedRows[1] ?? []);
-  const columns = hasHeader
-    ? (normalizedRows[0] ?? []).map((value, index) => value.trim() || `Колонка ${index + 1}`)
-    : Array.from({ length: width }, (_, index) => `Колонка ${index + 1}`);
-  const rows = hasHeader ? normalizedRows.slice(1) : normalizedRows;
-  if (columns.length < 2) throw new Error('В CSV должно быть минимум две колонки для X и Y.');
-  return { file, fileName: file.name, delimiter, hasHeader, columns, rows, previewRows: rows.slice(0, 12), sourceKind: 'csv' };
+  if (file.size > MAX_IMPORT_BYTES) throw new Error('Файл превышает 16 МБ.');
+  const parsed = parseCsvRecords(await readTextFile(file));
+  return { file, fileName: file.name, delimiter: parsed.delimiter, sourceKind: 'csv', ...tableWithHeader(parsed.rows, guessTableHeader(parsed.rows)) };
 }
 
 async function buildExcelPreview(file: File): Promise<CsvPreviewData> {
-  const XLSX = await import('xlsx');
-  const buffer = await file.arrayBuffer();
-  const workbook = XLSX.read(buffer, { type: 'array' });
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) throw new Error('В Excel-файле нет листов.');
-  const sheet = workbook.Sheets[sheetName];
-  const rawRows = XLSX.utils.sheet_to_json<Array<string | number | boolean | null>>(sheet, {
-    header: 1,
-    blankrows: false,
-    defval: ''
-  }) as Array<Array<string | number | boolean | null>>;
-  const parsedRows = rawRows
-    .map((row) => row.map((value) => String(value ?? '').trim()))
-    .filter((row) => row.some((value) => value.trim() !== ''));
-  if (parsedRows.length === 0) throw new Error('Excel-лист пустой.');
-  const width = Math.max(...parsedRows.map((row) => row.length));
-  const normalizedRows = parsedRows.map((row) => Array.from({ length: width }, (_, index) => row[index] ?? ''));
-  const hasHeader = guessHasHeader(normalizedRows[0] ?? [], normalizedRows[1] ?? []);
-  const columns = hasHeader
-    ? (normalizedRows[0] ?? []).map((value, index) => value.trim() || `Колонка ${index + 1}`)
-    : Array.from({ length: width }, (_, index) => `Колонка ${index + 1}`);
-  const rows = hasHeader ? normalizedRows.slice(1) : normalizedRows;
-  if (columns.length < 2) throw new Error('В Excel должно быть минимум две колонки для X и Y.');
-  return { file, fileName: file.name, delimiter: '', hasHeader, columns, rows, previewRows: rows.slice(0, 12), sourceKind: 'excel', sheetName };
+  if (file.size > MAX_IMPORT_BYTES) throw new Error('Файл превышает 16 МБ.');
+  const result = await workerTask<{rows: string[][]; sheetName: string}>(new Worker(new URL('../workers/excel.worker.ts', import.meta.url), { type: 'module' }), await file.arrayBuffer());
+  return { file, fileName: file.name, delimiter: '', sourceKind: 'excel', sheetName: result.sheetName, ...tableWithHeader(result.rows, guessTableHeader(result.rows)) };
 }
 
 async function buildImportPreview(file: File): Promise<CsvPreviewData> {
@@ -390,9 +317,10 @@ function pushIssue(issues: ModelIssue[], level: ModelIssueLevel, title: string, 
   issues.push({ level, title, details: details.slice(0, 18) });
 }
 
-function buildModelCheck(project: PileProject): ModelCheckResult {
+export function buildModelCheck(project: PileProject): ModelCheckResult {
   const issues: ModelIssue[] = [];
   const groupIds = new Set(project.groups.map((group) => group.id));
+  const groupById = new Map(project.groups.map(group => [group.id, group]));
   const pointById = new Map(project.points.map((point) => [point.id, point]));
   const pointIndex = new Map(project.points.map((point, index) => [point.id, index]));
   const pointsWithoutGroup = project.points.filter((point) => !point.groupId).length;
@@ -412,30 +340,34 @@ function buildModelCheck(project: PileProject): ModelCheckResult {
   pushIssue(issues, 'info', 'Пустые группы', emptyGroups.map((group) => `${group.name} · id ${group.id.slice(-6)}`));
 
   const duplicateGlobalDetails: string[] = [];
-  const byNumber = new Map<number, typeof project.points>();
+  const byNumber = new Map<string, typeof project.points>();
   for (const point of project.points) {
     if (isPointUnnumbered(point)) continue;
     const number = Number(point.number);
-    const current = byNumber.get(number) ?? [];
+    const key = JSON.stringify([numberingSpace(project, groupById.get(point.groupId ?? '')), number]);
+    const current = byNumber.get(key) ?? [];
     current.push(point);
-    byNumber.set(number, current);
+    byNumber.set(key, current);
   }
-  for (const [number, points] of byNumber) {
+  for (const points of byNumber.values()) {
+    const number = points[0].number;
     if (points.length <= 1) continue;
     duplicateGlobalDetails.push(`№ ${number}: ${points.map((point) => `${groupDisplayName(project, point.groupId)} / ${point.id.slice(-6)}`).join('; ')}`);
   }
-  pushIssue(issues, 'error', 'Дубли номеров в проекте', duplicateGlobalDetails);
+  pushIssue(issues, 'error', 'Дубли номеров в одном пространстве нумерации', duplicateGlobalDetails);
 
   const duplicateManualDetails: string[] = [];
-  const manualByNumber = new Map<number, typeof project.points>();
+  const manualByNumber = new Map<string, typeof project.points>();
   for (const point of manualNumbered) {
     if (isPointUnnumbered(point)) continue;
     const number = Number(point.number);
-    const current = manualByNumber.get(number) ?? [];
+    const key = JSON.stringify([numberingSpace(project, groupById.get(point.groupId ?? '')), number]);
+    const current = manualByNumber.get(key) ?? [];
     current.push(point);
-    manualByNumber.set(number, current);
+    manualByNumber.set(key, current);
   }
-  for (const [number, points] of manualByNumber) {
+  for (const points of manualByNumber.values()) {
+    const number = points[0].number;
     if (points.length <= 1) continue;
     duplicateManualDetails.push(`Ручной № ${number}: ${points.map((point) => `${groupDisplayName(project, point.groupId)} / ${point.id.slice(-6)}`).join('; ')}`);
   }
@@ -571,6 +503,15 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const [nanoCadModelScanId, setNanoCadModelScanId] = useState<string | null>(null);
   const [nanoCadModelScannedAt, setNanoCadModelScannedAt] = useState<number | null>(null);
   const [nanoCadModelScanScope, setNanoCadModelScanScope] = useState<CadScanScope | null>(null);
+  useEffect(() => {
+    const invalidate = () => {
+      setNanoCadModelScanId(null); setNanoCadBlockScanId(null);
+      setNanoCadModelScannedAt(null); setNanoCadBlockScannedAt(null);
+      setNanoCadModelScanScope(null); setNanoCadBlockScanScope(null);
+    };
+    window.addEventListener('pile-numbering:cad-changed', invalidate);
+    return () => window.removeEventListener('pile-numbering:cad-changed', invalidate);
+  }, []);
   const [nanoCadSelectedModelObject, setNanoCadSelectedModelObject] = useState('');
   const [nanoCadModelNumberParameter, setNanoCadModelNumberParameter] = useState('');
   const [nanoCadModelObjectFilter, setNanoCadModelObjectFilter] = useState('GPP_PILE_NUMBER');
@@ -701,8 +642,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
       // ignore
     }
     const timer = window.setTimeout(() => {
-      getUserConfig()
-        .then((config) => saveUserConfig({ ...config, toolbarHeight }))
+      saveUserConfig({ toolbarHeight })
         .catch(() => {
           // backend config unavailable in browser fallback
         });
@@ -828,6 +768,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     const fileName = `${safeFileName(project.project.name || 'project')}${asCopy ? '_копия' : ''}.pilenum.json`;
     const jsonText = JSON.stringify(asCopy ? makeProjectCopy(project) : projectPayload, null, 2);
     const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+    return queueProjectSave(project.project.id, async () => {
     const success = (path: string) => {
       if (!isProjectSession(context)) return 'Файл сохранён для предыдущего проекта.';
       if (!asCopy) useProjectStore.getState().markProjectSaved(project, context.sessionId);
@@ -879,6 +820,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     a.remove();
     URL.revokeObjectURL(url);
     return report(asCopy ? `Копия проекта передана браузеру для сохранения: ${fileName}` : `JSON передан браузеру для сохранения: ${fileName}`);
+    });
   };
   const downloadProjectJson = () => writeProjectJson(false);
   const saveProjectAsCopy = async () => {
@@ -1305,6 +1247,8 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
       setExportStatus(message);
       setProjectStatus(message);
     } catch (e) {
+      setNanoCadBlockScanId(null);
+      setNanoCadModelScanId(null);
       if (e instanceof CadOperationCancelled) {
         setNanoCadBlockScanId(null);
         setNanoCadModelScanId(null);
@@ -1760,7 +1704,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
           onClose={() => setCreateProjectOpen(false)}
         >
           <div className="project-dialog-panel">
-            <div className="panel-hint">Новый проект создаётся пустым. Текущий проект останется в истории отмены, но лучше сохрани его перед созданием нового.</div>
+            <div className="panel-hint">Новый проект создаётся пустым. Перед сменой можно сохранить текущий проект. История отмены начинается заново для каждого открытого документа.</div>
             <label className="form-row">
               <span>Имя проекта</span>
               <input value={createProjectName} onChange={(event) => setCreateProjectName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') createProjectFromDialog(); }} autoFocus />
@@ -1879,6 +1823,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                         <label><span>Координата Y</span><select value={importYColumn} onChange={(event) => setImportYColumn(event.target.value)}>{importPreview.columns.map((column, index) => <option key={index} value={index}>{column}</option>)}</select></label>
                         <label><span>Исходный номер</span><select value={importNumberColumn} onChange={(event) => setImportNumberColumn(event.target.value)}><option value="">Не импортировать</option>{importPreview.columns.map((column, index) => <option key={index} value={index}>{column}</option>)}</select></label>
                       </div>
+                      <label><input type="checkbox" checked={importPreview.hasHeader} onChange={e => setImportPreview({ ...importPreview, ...tableWithHeader(importPreview.allRows, e.target.checked) })} />Первая строка — заголовок</label>
                       <div className="csv-preview-wrap"><table className="csv-preview-table"><thead><tr>{importPreview.columns.map((column, index) => <th key={index}>{column}</th>)}</tr></thead><tbody>{importPreview.previewRows.map((row, rowIndex) => (<tr key={rowIndex}>{importPreview.columns.map((_column, colIndex) => <td key={colIndex}>{row[colIndex] ?? ''}</td>)}</tr>))}</tbody></table></div>
                     </>
                   ) : <div className="empty-message">Выбери CSV, XLSX или XLS. После выбора появится предпросмотр и выбор колонок.</div>}
@@ -1888,7 +1833,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                   <div className="base-point-card flat">
                     <label className="cad-checkbox-line"><input type="checkbox" checked={importUseBasePoint} onChange={(event) => setImportUseBasePoint(event.target.checked)} /><span>Применить базовую точку / смещение при импорте</span></label>
                     <div className="base-point-grid"><label><span>База X</span><input value={importBaseX} onChange={(event) => setImportBaseX(event.target.value)} disabled={!importUseBasePoint} /></label><label><span>База Y</span><input value={importBaseY} onChange={(event) => setImportBaseY(event.target.value)} disabled={!importUseBasePoint} /></label></div>
-                    <small>Для файлов итоговая координата = координата из файла + базовая точка. Значение сохраняется в meta точек.</small>
+                    <small>Для файлов итоговая координата = координата из файла − базовая точка (100,200 − 10,20 = 90,180). Значение сохраняется в meta точек.</small>
                   </div>
                 </div>
                 {renderCadProgress(fileImportProgress, importStatus)}
