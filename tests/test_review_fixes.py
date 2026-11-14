@@ -177,7 +177,8 @@ class ReviewBackendTests(unittest.TestCase):
             self.assertLessEqual(len(name), 173)
             self.assertNotIn(name.split('.')[0].upper(), {'CON','AUX','NUL','COM1','LPT1','COM¹'})
             self.assertFalse(any(ord(c)<32 for c in name))
-        with patch.dict(os.environ, {'PILE_NUMBERING_DATA_DIR': self.folder}): self.assertEqual(RuntimePaths.default().root, self.root)
+        # Hosted Windows may spell the same temp root with its 8.3 alias.
+        with patch.dict(os.environ, {'PILE_NUMBERING_DATA_DIR': self.folder}): self.assertEqual(RuntimePaths.default().root, self.root.resolve())
 
     def test_PN063_launcher_patches_every_persistent_path(self):
         import importlib.util
