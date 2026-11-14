@@ -35,7 +35,7 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install Python dependencies
-        run: python -m pip install -r backend/requirements.txt pywebview==6.2.1
+        run: python -m pip install -r backend/requirements-dev.txt pywebview==6.2.1
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
       - name: Build production frontend
@@ -51,6 +51,9 @@ jobs:
           node tools/checks/cad_scan_workflow_check.cjs
           node tools/checks/transfer_regression_check.cjs
           node tools/checks/project_session_check.cjs
+          node tools/checks/full_review_check.cjs
+          node tools/checks/worker_import_check.cjs
+          node tools/checks/vite_dev_check.cjs
           node tools/checks/operation_log_check.cjs
           python tools/checks/frontend_contract_check.py
           python tools/checks/locked_state_contract_check.py

@@ -1,3 +1,10 @@
+import { useEffect, useState } from 'react';
+import { getUserConfig, resolveApiAssetUrl } from '../api/client';
+import { RIBBON_COMMANDS } from '../utils/commandRegistry';
+
+let iconMap: Record<string, string> = {};
+let loadingIcons: Promise<unknown> | null = null;
+let iconRevision = 0;
 const paths: Record<string, string> = {
   'group-flow': 'M5 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6 M5 10v3 M7 15h3 M12 15h3 M17 15h3 M17 12l3 3-3 3 M20 18v3h-6v-6',
   'group-focus': 'M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10 M12 10v4 M10 12h4 M3 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4 M21 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4 M3 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4 M21 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4',
@@ -35,6 +42,22 @@ const paths: Record<string, string> = {
   '↷': 'M16 4l5 5-5 5 M21 9h-11a7 7 0 0 0 0 14',
 };
 
-export function CommandIcon({ icon }: { icon: string }) {
+export function CommandIcon({ icon, commandId }: { icon: string; commandId?: string }) {
+  const [map, setMap] = useState(iconMap);
+  const [failed, setFailed] = useState('');
+  useEffect(() => {
+    const updated = (e: Event) => { iconRevision++; iconMap = (e as CustomEvent<Record<string, string>>).detail; setMap(iconMap); setFailed(''); };
+    window.addEventListener('pile-numbering:command-icons-updated', updated);
+    const revision = iconRevision;
+    if (!loadingIcons) loadingIcons = getUserConfig().then(config => {
+      if (revision !== iconRevision) return;
+      iconMap = config.commandIcons ?? {};
+      window.dispatchEvent(new CustomEvent('pile-numbering:command-icons-updated', { detail: iconMap }));
+    }).catch(() => { loadingIcons = null; });
+    return () => window.removeEventListener('pile-numbering:command-icons-updated', updated);
+  }, []);
+  const id = commandId ?? RIBBON_COMMANDS.find(command => command.defaultIcon === icon)?.id;
+  const url = id ? map[id] : undefined;
+  if (url && url !== failed && /^\/api\/assets\/icons\/[a-f0-9]{64}\.(png|svg)$/.test(url)) return <img src={resolveApiAssetUrl(url)} alt="" crossOrigin="use-credentials" onError={() => setFailed(url)} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />;
   return paths[icon] ? <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[icon]} /></svg> : <>{icon}</>;
 }

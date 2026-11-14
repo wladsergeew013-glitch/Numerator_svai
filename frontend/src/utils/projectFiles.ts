@@ -1,4 +1,6 @@
 import { GridSettings, PileProject, ViewSettings } from '../types/project';
+import { validateSettings } from './validation';
+import { createEmptyProject } from '../types/project';
 
 export const UI_SETTINGS_FILE_KIND = 'pile-numbering-ui-settings';
 export const UI_SETTINGS_FILE_SCHEMA_VERSION = 1;
@@ -62,6 +64,10 @@ export function parseUiSettingsFile(payload: unknown): Pick<UiSettingsFile, 'gri
 
   const gridSettings = isObject(payload.gridSettings) ? payload.gridSettings : {};
   const viewSettings = isObject(payload.viewSettings) ? payload.viewSettings : {};
+  if (payload.schemaVersion !== undefined && payload.schemaVersion !== UI_SETTINGS_FILE_SCHEMA_VERSION) throw new Error('Неподдерживаемая версия настроек.');
+  const defaults = createEmptyProject();
+  validateSettings(gridSettings, { ...defaults.gridSettings }, 'gridSettings');
+  validateSettings(viewSettings, { ...defaults.viewSettings }, 'viewSettings');
 
   if (Object.keys(gridSettings).length === 0 && Object.keys(viewSettings).length === 0) {
     throw new Error('В файле нет gridSettings/viewSettings.');

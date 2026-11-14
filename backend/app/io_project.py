@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 from typing import Iterable
 from uuid import uuid4
 
@@ -40,7 +41,13 @@ def _parse_float(value: str | None, row_number: int, col_name: str) -> float:
     cleaned = value.strip().replace(" ", "").replace(",", ".")
     if cleaned == "":
         raise ValueError(f"Row {row_number}: empty {col_name}")
-    return float(cleaned)
+    try:
+        result = float(cleaned)
+    except ValueError as exc:
+        raise ValueError(f'Row {row_number}: invalid {col_name}') from exc
+    if not math.isfinite(result):
+        raise ValueError(f'Row {row_number}: {col_name} must be finite')
+    return result
 
 
 def import_points_from_csv(content: bytes) -> CsvImportResponse:
@@ -51,8 +58,16 @@ def import_points_from_csv(content: bytes) -> CsvImportResponse:
     """
     text = _read_csv_text(content)
     sample = text[:2048]
-    dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-    has_header = csv.Sniffer().has_header(sample)
+    if not sample.strip():
+        raise ValueError('CSV is empty')
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+        first = next(csv.reader(io.StringIO(text), dialect=dialect, strict=True))
+    except (csv.Error, StopIteration) as exc:
+        raise ValueError('CSV: cannot determine columns or delimiter') from exc
+    if len(first) < 2:
+        raise ValueError('CSV must contain X and Y columns')
+    has_header = _find_column(first, X_ALIASES) is not None and _find_column(first, Y_ALIASES) is not None
 
     points: list[PilePoint] = []
 
@@ -68,6 +83,8 @@ def import_points_from_csv(content: bytes) -> CsvImportResponse:
             raise ValueError(f"CSV must contain X and Y columns. Found: {fieldnames}")
 
         for idx, row in enumerate(reader, start=2):
+            if None in row:
+                raise ValueError(f'Row {idx}: too many columns')
             if not row or all((v or "").strip() == "" for v in row.values()):
                 continue
             x = _parse_float(row.get(x_col), idx, x_col)
@@ -77,6 +94,7 @@ def import_points_from_csv(content: bytes) -> CsvImportResponse:
             if not source_id and source_number:
                 source_id = str(source_number)
 
+            if len(points) >= 100000: raise ValueError('CSV exceeds the limit of 100000 points')
             points.append(
                 PilePoint(
                     id=f"p-{uuid4().hex[:12]}",
@@ -102,6 +120,7 @@ def import_points_from_csv(content: bytes) -> CsvImportResponse:
             y = _parse_float(row[1], idx, "y")
             source_number = row[2].strip() if len(row) >= 3 and row[2].strip() else None
             source_id = str(source_number) if source_number else None
+            if len(points) >= 100000: raise ValueError('CSV exceeds the limit of 100000 points')
             points.append(
                 PilePoint(
                     id=f"p-{uuid4().hex[:12]}",
@@ -117,6 +136,10 @@ def import_points_from_csv(content: bytes) -> CsvImportResponse:
                 )
             )
 
+    if not points:
+        raise ValueError('CSV contains no points')
+    if len(points) > 100000:
+        raise ValueError('CSV exceeds the limit of 100000 points')
     return CsvImportResponse(points=points)
 
 

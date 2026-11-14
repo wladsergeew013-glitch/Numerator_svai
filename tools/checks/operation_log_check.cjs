@@ -9,7 +9,11 @@ function load(relative, context) {
     .replace('import.meta.env.VITE_API_BASE', "'http://test'")
     .replace('import.meta.env.DEV', 'true');
   const exports = {};
-  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports, ...context });
+  const requireRelative = name => {
+    assert.ok(name.startsWith('.'), `Unexpected runtime dependency: ${name}`);
+    return load(path.relative(root,path.resolve(path.dirname(path.join(root,relative)),name+'.ts')),context);
+  };
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports, require:requireRelative, ...context });
   return exports;
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -34,9 +38,15 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
   async function scenario(responses) {
     const events = [];
     const window = { dispatchEvent: event => events.push(event.detail), setTimeout: callback => queueMicrotask(callback) };
-    const client = load('frontend/src/api/client.ts', { ...runtime, window, CustomEvent: class { constructor(name, options) { this.detail = options.detail; } },
-      fetch: async () => {
+    const client = load('frontend/src/api/client.ts', { ...runtime, window, Headers, CustomEvent: class { constructor(name, options) { this.detail = options.detail; } },
+      fetch: async (url, init) => {
         now += 500;
+        assert.equal(init.credentials, 'include');
+        if (url.endsWith('/api/session')) {
+          assert.equal(init.method, 'POST'); assert.equal(init.headers['X-Pile-Client'], '1');
+          return {ok:true,json:async()=>({token:'fixture-session'})};
+        }
+        assert.equal(init.headers.get('X-Pile-Token'), 'fixture-session', 'Every API operation carries the session credential');
         const response = responses.shift();
         if (response instanceof Error) throw response;
         if (!response) throw new Error('Unexpected request');
@@ -49,7 +59,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
   }
   let run = await scenario([{ id: 'scan-one' }, { id: 'scan-one', status: 'completed', phase: 'Готово', completed: 10, total: 10, elapsedSeconds: 0.2, result: { blocks: [] } }]);
   assert.equal(run.failure, undefined);
-  assert.equal(run.events.at(-1).clientElapsedSeconds, 1);
+  assert.equal(run.events.at(-1).clientElapsedSeconds, 1.5, 'Duration includes the local session handshake');
   assert.equal(run.events.at(-1).kind, 'blocks/scan');
   run = await scenario([{ id: 'scan-two' }, ...Array.from({ length: 5 }, () => new Error('connection lost'))]);
   assert.ok(run.failure);

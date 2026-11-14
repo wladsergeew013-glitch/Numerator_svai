@@ -121,12 +121,14 @@ class DesktopLifecycleTest(unittest.TestCase):
         self.assertIn('pile-numbering:close-requested', api._window.script)
         self.assertFalse(api._window.closed)
         # Cancel leaves the application open; only the confirmed action destroys it.
-        api.closeConfirmed()
+        with patch('app.cad_operations.shutdown', return_value=True) as stop:
+            api.closeConfirmed()
+        stop.assert_called_once()
         self.assertTrue(api._window.closed)
         self.assertTrue(api._on_closing())
 
     def test_can_close_during_startup(self):
-        with patch.object(launcher, '_splash_close'):
+        with patch.object(launcher, '_splash_close'), patch('app.cad_operations.begin_shutdown'), patch('app.cad_operations.is_busy', return_value=False):
             self.assertTrue(launcher.DesktopApi()._on_closing())
 
     def test_failed_replace_preserves_existing_project(self):

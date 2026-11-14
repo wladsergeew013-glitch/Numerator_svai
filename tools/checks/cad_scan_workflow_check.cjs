@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
+const {pathToFileURL} = require('node:url');
 const root = path.resolve(__dirname, '../..');
 const ts = require(path.join(root, 'frontend/node_modules/typescript'));
 const loaded = new Map();
@@ -49,7 +50,10 @@ function load(file) {
     return original(name);
   };
   loaded.set(file, mod);
-  mod._compile(ts.transpileModule(fs.readFileSync(file, 'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS, target:ts.ScriptTarget.ES2022, jsx:ts.JsxEmit.ReactJSX}}).outputText, file);
+  // Vite worker entry URLs are real source syntax; this CJS harness supplies the
+  // equivalent file URL without changing or suppressing any tested handler.
+  const source = fs.readFileSync(file, 'utf8').replaceAll('import.meta.url', JSON.stringify(pathToFileURL(file).href));
+  mod._compile(ts.transpileModule(source, {compilerOptions:{module:ts.ModuleKind.CommonJS, target:ts.ScriptTarget.ES2022, jsx:ts.JsxEmit.ReactJSX}}).outputText, file);
   return mod.exports;
 }
 global.window = {innerWidth:1500, innerHeight:950, localStorage:{getItem:() => null, setItem() {}}, setTimeout, clearTimeout};

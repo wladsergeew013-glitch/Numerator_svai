@@ -19,6 +19,10 @@ class ComDocumentWithoutObjectApi:
     Name = 'sdk-test.dwg'
     saves = 0
 
+    def GetVariable(self, name):
+        assert name == 'FINGERPRINTGUID'
+        return '11111111-1111-4111-8111-111111111111'
+
     @property
     def ModelSpace(self):
         raise AssertionError('TeighaX ModelSpace must not be accessed')
@@ -103,7 +107,7 @@ class SdkBridgeTests(unittest.TestCase):
 
     def test_sdk_number_export_writes_existing_parameter_and_verifies_readback(self):
         point = api.NanoCadExportPoint(id='pile', x=125, y=220, number=91,
-            meta={'cadHandle': 'A', 'cadDocument': self.com.FullName, 'objectName': 'Pile'})
+            meta={'cadHandle': 'A', 'cadDocument': self.com.FullName, 'cadDocumentGuid': self.com.GetVariable('FINGERPRINTGUID'), 'objectName': 'Pile'})
         result = api.export_modelstudio_objects(api.NanoCadModelStudioExportRequest(
             scope='all', matchMode='handles', numberParameter='GPP_PILE_NUMBER', points=[point]))
         self.assertEqual(result['updated'], 1)

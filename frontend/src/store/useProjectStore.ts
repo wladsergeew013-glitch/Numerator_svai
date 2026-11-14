@@ -1,8 +1,11 @@
+import { changedFields, mergePatch } from '../utils/configPatch';
+import { numberingSpace } from '../utils/numberingSpace';
 import { projectSaveSignature } from '../utils/projectSaveState';
+import { validateNumbering, validateProjectPayload } from '../utils/validation';
 import { newImportPoints, reconcileCadImport, type CadImportReconciliation } from '../utils/importPoints';
 import { DEFAULT_CLUSTER_OPTIONS, type ClusterApplication } from '../types/clustering';
 import { create } from 'zustand';
-import { getUserConfig, numberRows, saveUserConfig as saveUserConfigFile, type UserConfigPayload } from '../api/client';
+import { saveUserConfig as saveUserConfigFile, type UserConfigPayload } from '../api/client';
 import {
   CAD_BASE_COLORS,
   createEmptyProject,
@@ -74,6 +77,10 @@ function groupPointCount(points: PilePoint[], groupId: string) {
   return points.filter((point) => point.groupId === groupId).length;
 }
 
+function canEditPoint(point: PilePoint, lockedGroups: ReadonlySet<string>) {
+  return !point.locked && (!point.groupId || !lockedGroups.has(point.groupId));
+}
+
 function editableMembershipTargets(project: PileProject, ids: string[], targetGroupId: string | null) {
   const target = targetGroupId ? project.groups.find(group => group.id === targetGroupId) : null;
   if (targetGroupId && (!target || target.locked)) return [];
@@ -81,7 +88,7 @@ function editableMembershipTargets(project: PileProject, ids: string[], targetGr
   const byId = new Map(project.points.map(point => [point.id, point]));
   return Array.from(new Set(ids)).filter(id => {
     const point = byId.get(id);
-    return point && !point.locked && (!point.groupId || !lockedGroups.has(point.groupId));
+    return point && canEditPoint(point, lockedGroups);
   });
 }
 
@@ -309,6 +316,7 @@ export function buildGroupFlow(project: PileProject) {
 
 function findFirstNonEmptyGroup(project: PileProject, preferredGroupId?: string | null, preferredPipelineId?: string | null) {
   const preferredGroup = preferredGroupId ? project.groups.find((group) => group.id === preferredGroupId) : null;
+  if (preferredGroup) return preferredGroup;
   const pipelineId = preferredPipelineId ?? (preferredGroup ? groupPipelineId(preferredGroup, project) : defaultPipelineId(project));
   const groups = sortedGroupsForPipeline(project, pipelineId);
   const preferred = preferredGroupId ? groups.find((group) => group.id === preferredGroupId) : null;
@@ -402,23 +410,10 @@ function buildUserConfig(state: Pick<ProjectState, 'project' | 'groupManagerVisi
 
 async function mergeAndSaveUserConfig(config: UserConfig) {
   try {
-    const existing = await getUserConfig();
-    await saveUserConfigFile({
-      ...existing,
-      ...config,
-      gridSettings: { ...(existing.gridSettings ?? {}), ...(config.gridSettings ?? {}) },
-      viewSettings: { ...(existing.viewSettings ?? {}), ...(config.viewSettings ?? {}) },
-      panels: existing.panels ?? {}
-    });
+    await saveUserConfigFile(config);
   } catch {
     // Backend config can be unavailable in pure static/browser fallback.
   }
-}
-
-function saveUserConfig(state: Pick<ProjectState, 'project' | 'groupManagerVisible' | 'groupManagerDock' | 'groupManagerCollapsed' | 'autoAssignSelection' | 'collapsedGroupIds'>) {
-  if (typeof window === 'undefined') return;
-  const config = buildUserConfig(state);
-  void mergeAndSaveUserConfig(config);
 }
 
 function sanitizeGroupsNumbering(groups: PileGroup[], points: PilePoint[]): PileGroup[] {
@@ -462,50 +457,17 @@ function withSanitizedNumberingRefs(project: PileProject): PileProject {
 }
 
 function normalizeViewSettingsForCurrentUi(viewSettings: PileProject['viewSettings']): PileProject['viewSettings'] {
-  const next = { ...viewSettings };
-
-  // Миграция старых проектов/конфигов: базовый режим — простой Tahoma,
-  // без тяжёлых обводок текста и без ядовито-красных служебных выносок.
-  if (!next.numberTextFontFamily || next.numberTextFontFamily.includes('Inter')) next.numberTextFontFamily = 'Tahoma, Segoe UI, Arial, sans-serif';
-  if (!next.markerTextFontFamily || next.markerTextFontFamily.includes('Inter')) next.markerTextFontFamily = 'Tahoma, Segoe UI, Arial, sans-serif';
-
-  if (next.numberTextStrokeColor === '#020617' && (next.numberTextStrokeWidth ?? 0.8) <= 0.8) {
-    next.numberTextStrokeEnabled = false;
-    next.numberTextStrokeWidth = 0;
-  }
-  if (next.markerTextStrokeColor === '#020617' && (next.markerTextStrokeWidth ?? 0.9) <= 0.9) {
-    next.markerTextStrokeEnabled = false;
-    next.markerTextStrokeWidth = 0;
-  }
-  if (next.numberTextBubbleColor === '#020617' || next.numberTextBubbleColor === '#000000' || next.numberTextBubbleColor === 'rgba(2,6,23,0.72)') {
-    next.numberTextBubbleEnabled = false;
-  }
-  if ((next.previewPointLabelStrokeWidth ?? 0) <= 1 && next.previewPointLabelStrokeColor === '#020617') {
-    next.previewPointLabelStrokeWidth = 0;
-  }
-
-  // Старые дефолты были слишком агрессивными на тёмном поле. Если пользователь
-  // не выбирал другой цвет, переводим их в спокойную CAD-палитру.
-  if (next.groupOutlineStrokeColor === '#ef4444') next.groupOutlineStrokeColor = '#38bdf8';
-  if (next.markerCalloutBorderColor === '#ef4444') next.markerCalloutBorderColor = '#64748b';
-  if (next.markerLeaderLineColor === '#ef4444') next.markerLeaderLineColor = '#64748b';
-  if (next.previewAutoLineColor === '#a78bfa') next.previewAutoLineColor = '#38bdf8';
-  if (next.previewAutoArrowColor === '#c4b5fd') next.previewAutoArrowColor = '#67e8f9';
-
-  if (!next.markerTextColor || next.markerTextColor === '#bfdbfe') next.markerTextColor = '#ffffff';
-  if (!next.previewPointLabelColor || next.previewPointLabelColor === '#ede9fe') next.previewPointLabelColor = '#ffffff';
-  if (next.markerCalloutBackgroundColor === '#020617') next.markerCalloutBackgroundColor = 'rgba(15,23,42,0.82)';
-  if (next.numberTextBubbleStrokeColor === '#000000') next.numberTextBubbleStrokeColor = '#334155';
+  const next = { ...viewSettings, settingsVersion: 2 };
   if (next.groupOutlineDisplayVersion !== 2) {
     next.groupOutlineVisible = false;
     next.groupOutlineDisplayVersion = 2;
   }
   if (typeof next.showVectorPath !== 'boolean') next.showVectorPath = true;
-
   return next;
 }
 
 function normalizeProject(project: PileProject, uiSource?: Pick<PileProject, 'gridSettings' | 'viewSettings'>): PileProject {
+  validateProjectPayload(project);
   const defaults = createEmptyProject();
   const pipelines = normalizePipelines(project.pipelines ?? defaults.pipelines);
   const runtimeGridSettings = uiSource?.gridSettings ?? project.gridSettings ?? defaults.gridSettings;
@@ -994,17 +956,19 @@ function applyManualLinksToRoute(route: PilePoint[], links: NumberingManualLink[
   const naturalIndex = new Map(route.map((p, index) => [p.id, index]));
   const fixedEndId = endPointId && byId.has(endPointId) ? endPointId : null;
   const linkMap = new Map<string, string>();
+  const incoming = new Map<string, string>();
   for (const link of validLinks) {
-    if (byId.has(link.fromId) && byId.has(link.toId)) linkMap.set(link.fromId, link.toId);
+    if (byId.has(link.fromId) && byId.has(link.toId)) { linkMap.set(link.fromId, link.toId); incoming.set(link.toId, link.fromId); }
   }
   if (linkMap.size === 0) return route;
 
-  const unusedNaturalPoints = (used: Set<string>) => route.filter((p) => !used.has(p.id));
+  const unusedNaturalPoints = (used: Set<string>) => route.filter((p) => !used.has(p.id) && (!incoming.has(p.id) || used.has(incoming.get(p.id)!)));
 
   const nextNaturalAfter = (pointId: string, used: Set<string>) => {
     const index = naturalIndex.get(pointId) ?? -1;
     for (let i = index + 1; i < route.length; i += 1) {
       const candidate = route[i];
+      if (incoming.has(candidate.id) && !used.has(incoming.get(candidate.id)!)) continue;
       if (fixedEndId && candidate.id === fixedEndId && unusedNaturalPoints(used).some((p) => p.id !== fixedEndId)) continue;
       if (!used.has(candidate.id)) return candidate;
     }
@@ -1475,6 +1439,7 @@ export function buildNumberingOrder(points: PilePoint[], settings: NumberingSett
 }
 
 function numberRouteWithNext(points: PilePoint[], route: PilePoint[], settings: NumberingSettings, reserved = new Set<number>(), clusterPrefix?: number) {
+  validateNumbering(settings);
   let value = settings.startNumber;
   const step = settings.step;
   if (!Number.isSafeInteger(value) || !Number.isSafeInteger(step) || step === 0) {
@@ -1526,13 +1491,13 @@ function nextNumberAfterLockedGroup(points: PilePoint[], group: PileGroup, curre
     .filter((point) => point.groupId === group.id && typeof point.number === 'number' && Number.isFinite(point.number))
     .map((point) => point.number as number);
   if (groupNumbers.length === 0) return currentStart;
-  return Math.max(currentStart, Math.max(...groupNumbers) + step);
+  return step > 0 ? Math.max(currentStart, Math.max(...groupNumbers) + step) : Math.min(currentStart, Math.min(...groupNumbers) + step);
 }
 
 function clusterPrefixedNumber(prefix: number, localNumber: number) {
   const cleanPrefix = Math.max(1, Math.floor(Math.abs(prefix || 1)));
   const cleanLocal = Math.max(0, Math.floor(Math.abs(localNumber || 0)));
-  return Number(`${cleanPrefix}${cleanLocal}`);
+  return Number(`${localNumber < 0 ? '-' : ''}${cleanPrefix}${cleanLocal}`);
 }
 
 function isClusterGroup(group: PileGroup) {
@@ -1545,12 +1510,14 @@ function clusterPrefixForGroup(group: PileGroup) {
 }
 
 function numberingReservations(project: PileProject, group: PileGroup, preserveOtherGroups = false) {
-  const groupIds = new Set(project.numberingMode === 'global_sequential'
-    ? sortedGroupsForPipeline(project, groupPipelineId(group, project)).map(item => item.id) : [group.id]);
+  const space = numberingSpace(project, group);
+  const groupIds = new Set(project.groups.filter(item => numberingSpace(project, item) === space).map(item => item.id));
   const locked = new Set(project.groups.filter(item => item.locked).map(item => item.id));
-  return new Set(project.points.filter(point => point.groupId && groupIds.has(point.groupId)
+  const fixed = project.points.filter(point => point.groupId && groupIds.has(point.groupId)
     && (point.locked || point.manualNumber || locked.has(point.groupId) || (preserveOtherGroups && point.groupId !== group.id)))
-    .map(point => point.number).filter((number): number is number => typeof number === 'number' && Number.isFinite(number)));
+    .map(point => point.number).filter((number): number is number => typeof number === 'number' && Number.isFinite(number));
+  if (new Set(fixed).size !== fixed.length) throw new Error('Конфликт закреплённых номеров в одном пространстве нумерации. Устраните дубли до расчёта.');
+  return new Set(fixed);
 }
 
 function applyNumberingToGroup(points: PilePoint[], group: PileGroup, startNumber?: number, previousEndPoint?: Pick<PilePoint, 'x' | 'y'> | null, reserved = new Set<number>()) {
@@ -1576,7 +1543,7 @@ function applyNumberingToGroup(points: PilePoint[], group: PileGroup, startNumbe
 }
 
 
-function isManualLinkTargetAllowed(project: PileProject, group: PileGroup, fromId: string, toId: string) {
+export function isManualLinkTargetAllowed(project: PileProject, group: PileGroup, fromId: string, toId: string) {
   if (!fromId || !toId || fromId === toId) return false;
   const source = project.points.find((p) => p.id === fromId);
   const target = project.points.find((p) => p.id === toId);
@@ -1593,7 +1560,13 @@ function isManualLinkTargetAllowed(project: PileProject, group: PileGroup, fromI
   // Ручная связь управляет только конечной точкой текущего ребра.
   // Нельзя цепляться назад по уже построенному маршруту — это быстро создаёт петли
   // и ломает предыдущий участок нумерации.
-  return fromIndex >= 0 && toIndex > fromIndex;
+  if (fromIndex < 0 || toIndex <= fromIndex) return false;
+  const links = [...linksWithoutCurrentSource, { fromId, toId }];
+  if (new Set(links.map(link => link.toId)).size !== links.length) return false;
+  const candidate = buildOrderWithContinuity(groupPoints, { ...group.numbering, manualLinks: links }, context.previousEndPoint).route;
+  if (candidate.length !== groupPoints.length || new Set(candidate.map(point => point.id)).size !== groupPoints.length) return false;
+  const index = new Map(candidate.map((point, i) => [point.id, i]));
+  return links.every(link => index.has(link.fromId) && index.get(link.toId) === index.get(link.fromId)! + 1);
 }
 
 
@@ -1734,6 +1707,7 @@ interface ProjectState {
   numberingLinkToId: string | null;
   manualLinkClearMode: boolean;
   manualLinkClearSelection: string[];
+  draftOwner: { sessionId: string; groupId: string } | null;
   groupOutlineDrawMode: boolean;
   groupOutlineDraft: Point2D[];
   vectorPathDrawMode: boolean;
@@ -1877,7 +1851,7 @@ function projectSessionState(project: PileProject) {
     numberingPreview: EMPTY_NUMBERING_PREVIEW, numberingPickMode: null,
     numberingLinkFromId: null, numberingLinkToId: null,
     manualLinkClearMode: false, manualLinkClearSelection: [],
-    groupOutlineDrawMode: false, groupOutlineDraft: [],
+    draftOwner: null, groupOutlineDrawMode: false, groupOutlineDraft: [],
     vectorPathDrawMode: false, vectorPathEditMode: false, vectorPathDraft: [],
     settingsHoverTarget: null
   };
@@ -1923,7 +1897,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   numberingLinkToId: null,
   manualLinkClearMode: false,
   manualLinkClearSelection: [],
-  groupOutlineDrawMode: false,
+  draftOwner: null, groupOutlineDrawMode: false,
   groupOutlineDraft: [],
   vectorPathDrawMode: false,
   vectorPathEditMode: false,
@@ -1962,7 +1936,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       };
       return {
         project: updatedProject,
-        journalSnapshots: {
+        journalSnapshots: Object.fromEntries(Object.entries({
           ...state.journalSnapshots,
           [op.id]: {
             project: structuredClone(updatedProject),
@@ -1970,7 +1944,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             selectedGroupId: state.selectedGroupId,
             selectedPipelineId: state.selectedPipelineId
           }
-        }
+        }).filter(([id]) => updatedProject.operations.slice(-80).some(op => op.id === id)))
       };
     });
   },
@@ -2160,6 +2134,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const group = groupId ? get().project.groups.find((item) => item.id === groupId) : null;
     set({
       selectedGroupId: groupId,
+      ...(groupId !== get().selectedGroupId ? { groupOutlineDrawMode: false, groupOutlineDraft: [], vectorPathDrawMode: false, vectorPathDraft: [], vectorPathEditMode: false } : {}),
       groupDetailsId: groupId && get().groupDetailsId ? groupId : get().groupDetailsId,
       selectedPipelineId: group ? groupPipelineId(group, get().project) : get().selectedPipelineId,
       numberingPickMode: null,
@@ -2408,7 +2383,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     const idsSet = new Set(selectedPointIds);
     const lockedGroups = new Set(project.groups.filter((g) => g.locked).map((g) => g.id));
-    const deletedPoints = project.points.filter((p) => idsSet.has(p.id) && (!p.groupId || !lockedGroups.has(p.groupId)));
+    const deletedPoints = project.points.filter((p) => idsSet.has(p.id) && canEditPoint(p, lockedGroups));
     if (deletedPoints.length === 0) return;
     const deletableIds = new Set(deletedPoints.map((p) => p.id));
 
@@ -2436,7 +2411,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const lockedGroups = new Set(get().project.groups.filter((g) => g.locked).map((g) => g.id));
     const movableIds = selectedPointIds.filter((id) => {
       const point = get().project.points.find((p) => p.id === id);
-      return point && (!point.groupId || !lockedGroups.has(point.groupId));
+      return point && canEditPoint(point, lockedGroups);
     });
     if (movableIds.length === 0) return;
     const idsSet = new Set(movableIds);
@@ -2493,7 +2468,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         project: { ...state.project.project, updatedAt: new Date().toISOString() }
       },
       selectedPointIds: keepSourceSelection ? sourceSelectedIds : copiedPoints.map((p) => p.id),
-      selectedGroupId: keepSourceSelection ? state.selectedGroupId : copiedPoints[0]?.groupId ?? state.selectedGroupId
+      selectedGroupId: keepSourceSelection ? state.selectedGroupId : copiedPoints[0]?.groupId ?? state.selectedGroupId,
+      selectedPipelineId: !keepSourceSelection && copiedPoints[0]?.groupId
+        ? groupPipelineId(state.project.groups.find(group => group.id === copiedPoints[0].groupId)!, state.project)
+        : state.selectedPipelineId
     }));
     get().recordOperation('points_copied', { points: copiedPoints.length, dx, dy });
   },
@@ -2801,6 +2779,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!group || group.locked) return;
     set({
       selectedGroupId: resolvedGroupId,
+      draftOwner: { sessionId: get().projectSessionId, groupId: resolvedGroupId },
       groupOutlineDrawMode: true,
       groupOutlineDraft: [],
       vectorPathDrawMode: false,
@@ -2824,7 +2803,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   closeGroupOutlineDrawing: () => {
     const { project, selectedGroupId, groupOutlineDraft } = get();
     const group = selectedGroupId ? project.groups.find((g) => g.id === selectedGroupId) : null;
-    if (!group || group.locked || groupOutlineDraft.length < 3) {
+    if (!group || group.locked || groupOutlineDraft.length < 3 || get().draftOwner?.sessionId !== get().projectSessionId || get().draftOwner?.groupId !== group.id) {
       set({ groupOutlineDrawMode: false, groupOutlineDraft: [] });
       return;
     }
@@ -2865,6 +2844,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!group || group.locked) return;
     set({
       selectedGroupId: resolvedGroupId,
+      draftOwner: { sessionId: get().projectSessionId, groupId: resolvedGroupId },
       vectorPathDrawMode: true,
       vectorPathEditMode: false,
       vectorPathDraft: [],
@@ -2902,7 +2882,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const { project, selectedGroupId, vectorPathDraft } = get();
     const group = selectedGroupId ? project.groups.find((g) => g.id === selectedGroupId) : null;
     const vectorPath = compactWorldPath(vectorPathDraft, 1);
-    if (!group || group.locked || vectorPath.length < 2) {
+    if (!group || group.locked || vectorPath.length < 2 || get().draftOwner?.sessionId !== get().projectSessionId || get().draftOwner?.groupId !== group.id) {
       set({ vectorPathDrawMode: false, vectorPathDraft: [] });
       return;
     }
@@ -3148,6 +3128,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   updateGroupMeta: (groupId, patch) => {
+    if (patch.clusterPrefix !== undefined && (!Number.isSafeInteger(patch.clusterPrefix) || Number(patch.clusterPrefix) <= 0)) throw new Error('Индекс кластера должен быть положительным безопасным целым.');
     set((state) => ({
       project: {
         ...state.project,
@@ -3172,7 +3153,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   updateGroupNumbering: (groupId, patch) => {
-    if (get().project.groups.find((g) => g.id === groupId)?.locked) return;
+    const group = get().project.groups.find((g) => g.id === groupId);
+    if (!group || group.locked) return;
+    validateNumbering({ ...group.numbering, ...patch });
     set((state) => ({
       project: {
         ...state.project,
@@ -3404,11 +3387,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     get().recordOperation('number_label_moved', { pointId, offset });
   },
   setPointManualNumber: (pointId, number) => {
-    if (!Number.isFinite(number)) return;
+    if (!Number.isSafeInteger(number)) return;
     const point = get().project.points.find((p) => p.id === pointId);
     if (!point) return;
     const group = point.groupId ? get().project.groups.find((g) => g.id === point.groupId) : null;
-    if (group?.locked) return;
+    if (point.locked || group?.locked) return;
     get().pushHistory();
     set((state) => ({
       project: {
@@ -3417,7 +3400,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         project: { ...state.project.project, updatedAt: new Date().toISOString() }
       },
       selectedPointIds: [pointId],
-      selectedGroupId: point.groupId ?? state.selectedGroupId
+      selectedGroupId: point.groupId ?? state.selectedGroupId,
+      selectedPipelineId: group ? groupPipelineId(group, state.project) : state.selectedPipelineId
     }));
     get().recordOperation('point_manual_number_set', { pointId, number, groupId: point.groupId ?? null });
     if (get().numberingPreview.visible && point.groupId === get().numberingPreview.groupId) get().buildNumberingPreview();
@@ -3643,18 +3627,49 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
 let configSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
-useProjectStore.subscribe((state) => {
+useProjectStore.subscribe((state, previous) => {
+  if (state.project.operations === previous.project.operations) return;
+  const ids = new Set(state.project.operations.slice(-80).map(op => op.id));
+  const entries = Object.entries(state.journalSnapshots).filter(([id]) => ids.has(id));
+  if (entries.length !== Object.keys(state.journalSnapshots).length) useProjectStore.setState({ journalSnapshots: Object.fromEntries(entries) });
+});
+
+let pendingConfig: UserConfig = {};
+useProjectStore.subscribe((state, previous) => {
+  const patch = changedFields(buildUserConfig(state), buildUserConfig(previous));
+  if (!Object.keys(patch).length) return;
+  pendingConfig = mergePatch(pendingConfig, patch);
   if (configSaveTimer) clearTimeout(configSaveTimer);
-  configSaveTimer = setTimeout(() => saveUserConfig(state), 250);
+  configSaveTimer = setTimeout(() => {
+    const current = pendingConfig; pendingConfig = {};
+    void mergeAndSaveUserConfig(current);
+  }, 250);
+});
+
+// A draft is cancelled synchronously when its document or group loses ownership.
+useProjectStore.subscribe((state, previous) => {
+  if (state.projectSessionId === previous.projectSessionId && state.selectedGroupId === previous.selectedGroupId) return;
+  const ownsDraft = state.draftOwner?.sessionId === state.projectSessionId && state.draftOwner?.groupId === state.selectedGroupId;
+  if (state.groupOutlineDrawMode && !ownsDraft) state.cancelGroupOutlineDrawing();
+  if (state.vectorPathDrawMode && !ownsDraft) state.cancelVectorPathDrawing();
 });
 
 // Invalidate routes on domain changes, including Undo and changes in earlier
 // groups that affect continuity. Camera and panel changes preserve the cache.
+function routeDependencies(project: PileProject) {
+  return JSON.stringify([
+    project.numberingMode,
+    project.points.map(p => [p.id, p.x, p.y, p.groupId]),
+    project.groups.map(g => [g.id, g.pipelineId, g.order, g.numbering, g.meta?.clusterNumbering, g.meta?.clusterPrefix]),
+    project.pipelines.map(p => [p.id, p.order])
+  ]);
+}
 useProjectStore.subscribe((state, previous) => {
   if (state.project.points === previous.project.points && state.project.groups === previous.project.groups
     && state.project.pipelines === previous.project.pipelines && state.project.numberingMode === previous.project.numberingMode) return;
   const preview = state.numberingPreview;
   if (!preview.groupId || !preview.routePointIds.length) return;
+  if (routeDependencies(state.project) === routeDependencies(previous.project)) return;
   const group = state.project.groups.find(group => group.id === preview.groupId);
   const route = group ? buildPreviewOrderForGroup(state.project, group).route.map(point => point.id) : [];
   if (group && group.numbering.method === preview.method && route.length === preview.routePointIds.length

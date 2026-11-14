@@ -369,7 +369,7 @@ def check_exe_launcher_contract() -> None:
     for needle in [
         "frontend_dist", "pywebview", "webview.create_window", "uvicorn.Server",
         "StaticFiles", "_patch_backend_runtime_paths", "PROJECTS_DIR", "CONFIG_DIR",
-        "USER_CONFIG_PATH", "data", "images", "127.0.0.1", "_find_free_port",
+        "RuntimePaths(APP_DIR).globals()", "127.0.0.1", "_find_free_port",
         "exe_launcher.log", "BackendThread", "loop=\"asyncio\"", "http=\"h11\"",
         "lifespan=\"off\"", "thread.error", "timeout_seconds: float = 90.0",
         "_configure_local_proxy_bypass", "NO_PROXY", "no_proxy",
@@ -377,6 +377,9 @@ def check_exe_launcher_contract() -> None:
         "ProxyHandler({})", "_open_local_url_no_proxy",
     ]:
         require(launcher, needle, "tools/exe_launcher.py")
+    paths = read('backend/app/runtime_paths.py')
+    for field in ['PROJECTS_DIR', 'CONFIG_DIR', 'USER_CONFIG_PATH', 'AUTOSAVES_DIR', 'APP_ICON_PATH', 'LOGS_DIR', 'DATA_DIR', 'IMAGES_DIR', "'data'", "'images'"]:
+        require(paths, field, 'backend/app/runtime_paths.py')
 
     build = read("tools/06_build_exe.bat")
     for needle in ["tools\\PileNumbering.spec", "Checking backend venv portability", "VENV_BROKEN", "pyvenv.cfg", "Existing backend\\.venv is broken or copied from another PC"]:

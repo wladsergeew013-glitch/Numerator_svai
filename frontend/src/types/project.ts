@@ -164,6 +164,7 @@ export interface GridSettings {
 }
 
 export interface ViewSettings {
+  settingsVersion?: number;
   backgroundColor: string;
   zoom: number;
   panX: number;
@@ -327,6 +328,7 @@ export function createEmptyProject(): PileProject {
       snap: false
     },
     viewSettings: {
+      settingsVersion: 2,
       backgroundColor: '#111827',
       zoom: 0.05,
       panX: 80,

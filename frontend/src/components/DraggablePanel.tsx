@@ -86,20 +86,7 @@ function saveExternalPanelState(id: string, state: PanelState) {
   if (existingTimer) window.clearTimeout(existingTimer);
 
   const timer = window.setTimeout(() => {
-    getUserConfig()
-      .then((config) => saveUserConfig({
-        ...config,
-        panels: {
-          ...(config.panels ?? {}),
-          [id]: {
-            x: state.x,
-            y: state.y,
-            width: state.width,
-            height: state.height,
-            dock: state.dock ?? 'floating'
-          }
-        }
-      }))
+    saveUserConfig({ panels: { [id]: { ...state, dock: state.dock ?? 'floating' } } })
       .catch(() => {
         // backend config unavailable in browser fallback
       });
@@ -140,8 +127,12 @@ function writeRegistry(items: DockRecord[]) {
 }
 
 function updateRegistry(id: string, dock: GroupManagerDock) {
-  const registry = readRegistry().filter((item) => item.id !== id);
-  if (isDockSide(dock)) registry.push({ id, dock });
+  const registry = readRegistry();
+  const index = registry.findIndex(item => item.id === id);
+  if (isDockSide(dock)) {
+    if (index >= 0) registry[index] = { id, dock };
+    else registry.push({ id, dock });
+  } else if (index >= 0) registry.splice(index, 1);
   writeRegistry(registry);
 }
 
@@ -149,7 +140,7 @@ function removeFromRegistry(id: string) {
   writeRegistry(readRegistry().filter((item) => item.id !== id));
 }
 
-function loadPanelState(id: string, fallback: PanelState, allowSavedDock: boolean): PanelState {
+function loadPanelState(id: string, fallback: PanelState, allowSavedDock: boolean, top = 90): PanelState {
   if (typeof window === 'undefined') return fallback;
   try {
     const raw = window.localStorage.getItem(storageKey(id));
@@ -157,7 +148,7 @@ function loadPanelState(id: string, fallback: PanelState, allowSavedDock: boolea
     const parsed = JSON.parse(raw) as Partial<PanelState>;
     return {
       x: typeof parsed.x === 'number' ? parsed.x : fallback.x,
-      y: typeof parsed.y === 'number' ? parsed.y : fallback.y,
+      y: clamp(typeof parsed.y === 'number' ? parsed.y : fallback.y, Math.min(top, window.innerHeight - 40), Math.max(6, window.innerHeight - 40)),
       width: typeof parsed.width === 'number' ? parsed.width : fallback.width,
       height: typeof parsed.height === 'number' ? parsed.height : fallback.height,
       dock: allowSavedDock && (parsed.dock === 'left' || parsed.dock === 'right' || parsed.dock === 'floating') ? parsed.dock : fallback.dock
@@ -224,7 +215,7 @@ export function DraggablePanel({
   const canUseDock = dockable && !openFloating;
   const allowSavedDock = canUseDock;
   const fallback = useMemo(() => ({ x: initialX, y: initialY, width, height, dock: canUseDock ? (dock ?? 'floating' as GroupManagerDock) : 'floating' as GroupManagerDock }), [canUseDock, dock, height, initialX, initialY, width]);
-  const [panelState, setPanelState] = useState<PanelState>(() => loadPanelState(id, fallback, allowSavedDock));
+  const [panelState, setPanelState] = useState<PanelState>(() => loadPanelState(id, fallback, allowSavedDock, dockOffsetTop));
   const [internalDock, setInternalDock] = useState<GroupManagerDock>(() => canUseDock ? (panelState.dock ?? 'floating') : 'floating');
   const [panelZIndex, setPanelZIndex] = useState(nextPanelZIndex);
   const [dockPreview, setDockPreview] = useState<DockSide | null>(null);
@@ -232,6 +223,7 @@ export function DraggablePanel({
   const [nativeReady, setNativeReady] = useState(nativePanelsAvailable);
   const [detached, setDetached] = useState(false);
   const detachedRef = useRef(false);
+  const locallyChanged = useRef(false);
   const detachPending = useRef(false);
   const inlineMount = useRef<HTMLDivElement>(null);
   const [portalMount] = useState(() => {
@@ -262,13 +254,13 @@ export function DraggablePanel({
   useEffect(() => {
     let cancelled = false;
     loadExternalPanelState(id).then((external) => {
-      if (cancelled || !external) return;
+      if (cancelled || !external || locallyChanged.current) return;
       setPanelState((prev) => {
         const next = {
           ...prev,
           ...external,
           x: typeof external.x === 'number' ? external.x : prev.x,
-          y: typeof external.y === 'number' ? external.y : prev.y,
+          y: clamp(typeof external.y === 'number' ? external.y : prev.y, Math.min(dockOffsetTop, window.innerHeight - 40), Math.max(6, window.innerHeight - 40)),
           width: typeof external.width === 'number' ? external.width : prev.width,
           height: typeof external.height === 'number' ? external.height : prev.height,
           dock: allowSavedDock ? (external.dock ?? prev.dock) : 'floating'
@@ -292,6 +284,7 @@ export function DraggablePanel({
   const bringToFront = () => setPanelZIndex(nextPanelZIndex());
 
   const setDockValue = (nextDock: GroupManagerDock) => {
+    locallyChanged.current = true;
     if (!canUseDock) nextDock = 'floating';
     bringToFront();
     setPanelState((prev) => {
@@ -443,6 +436,7 @@ export function DraggablePanel({
   }, [canUseDock, dockOffsetBottom, dockOffsetTop, dockPreview, dockMaxWidth, effectiveDock, id, isDocked, minHeight, minWidth, nativeReady]);
 
   const startDrag = (event: React.MouseEvent) => {
+    locallyChanged.current = true;
     if ((event.target as HTMLElement).closest('button,input,select,label,textarea')) return;
     if (detached) {
       event.preventDefault();
@@ -479,6 +473,7 @@ export function DraggablePanel({
   };
 
   const startResize = (mode: ResizeMode, event: React.MouseEvent) => {
+    locallyChanged.current = true;
     bringToFront();
     resizeRef.current = {
       mode,
@@ -491,6 +486,20 @@ export function DraggablePanel({
     event.preventDefault();
     event.stopPropagation();
   };
+
+  useEffect(() => {
+    const recover = () => {
+      if (detachedRef.current) return;
+      setPanelState(prev => {
+        const x = clamp(prev.x, 6, Math.max(6, window.innerWidth - Math.min(prev.width, window.innerWidth - 16) - 6));
+        const y = clamp(prev.y, Math.min(dockOffsetTop, window.innerHeight - 40), Math.max(6, window.innerHeight - 40));
+        if (x === prev.x && y === prev.y) return prev;
+        const next = { ...prev, x, y }; savePanelState(id, next); return next;
+      });
+    };
+    recover(); window.addEventListener('resize', recover);
+    return () => window.removeEventListener('resize', recover);
+  }, [dockOffsetTop]);
 
   const style: CSSProperties = detached ? { position: 'relative', left: 0, top: 0, width: '100%', height: '100%', minWidth: 0, minHeight: 0 }
     : isDocked
@@ -506,7 +515,7 @@ export function DraggablePanel({
       }
     : {
         left: clamp(panelState.x, 6, Math.max(6, window.innerWidth - Math.min(panelState.width, viewportWidth) - 6)),
-        top: panelState.y,
+        top: clamp(panelState.y, Math.min(dockOffsetTop, window.innerHeight - 40), Math.max(6, window.innerHeight - 40)),
         width: Math.min(panelState.width, viewportWidth),
         height: panelState.height,
         minWidth: Math.min(minWidth, viewportWidth),

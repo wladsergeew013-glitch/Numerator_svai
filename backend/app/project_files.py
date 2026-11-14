@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -17,7 +18,8 @@ class ProjectFileConflict(ValueError):
 def project_file_lock(path: Path, timeout: float = 30):
     # Keep the sidecar: unlinking it would let a new writer lock another inode
     # while an existing writer still holds the old one. OS locks die on exit.
-    lock_path = path.resolve().with_name(f'.{path.name}.lock')
+    canonical = os.path.normcase(str(path.resolve()))
+    lock_path = path.resolve().with_name('.pilenum-' + hashlib.sha256(canonical.encode('utf-8')).hexdigest() + '.lock')
     with lock_path.open('a+b') as stream:
         if stream.tell() == 0:
             stream.write(b'\0')

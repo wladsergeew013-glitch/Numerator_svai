@@ -3,6 +3,7 @@ from __future__ import annotations
 from math import hypot
 
 from app.schemas import NumberingSettings, PilePoint
+from app.numbering_counter import number_route
 
 
 def _dist(a: PilePoint, b: PilePoint) -> float:
@@ -50,12 +51,13 @@ def build_route_order(points: list[PilePoint], settings: NumberingSettings) -> l
     start = by_id.get(settings.startPointId or "")
     if start is None:
         # Default: upper-left in engineering coordinates.
-        start = min(points, key=lambda p: (p.x, -p.y))
+        candidates = [p for p in points if p.id != settings.endPointId] or points
+        start = min(candidates, key=lambda p: (p.x, -p.y))
 
     route = _nearest_neighbor(points, start)
 
     end = by_id.get(settings.endPointId or "")
-    if end is not None and end in route and route[-1] != end:
+    if end is not None and end.id != start.id and end in route and route[-1] != end:
         # Rebuild the middle so the explicit end remains the last point.
         middle = [p for p in points if p not in (start, end)]
         route = _nearest_neighbor([start] + middle, start) + [end]
@@ -68,10 +70,5 @@ def build_route_order(points: list[PilePoint], settings: NumberingSettings) -> l
 def apply_numbering_route(points: list[PilePoint], settings: NumberingSettings) -> list[PilePoint]:
     result = [p.model_copy(deep=True) for p in points]
     route = build_route_order(result, settings)
-    value = settings.startNumber
-    for point in route:
-        if point.locked or point.manualNumber:
-            continue
-        point.number = value
-        value += settings.step
+    number_route(route, settings)
     return result

@@ -2,13 +2,15 @@
 
 ## Скачать Windows-версию
 
-[Последний релиз](https://github.com/wladsergeew013-glitch/Numerator_svai/releases/latest) · [Изменения v0.3.1](CHANGELOG.md) · [Статус исправлений по ревью](docs/REVIEW_FIXES_RU.md)
+[Последний релиз](https://github.com/wladsergeew013-glitch/Numerator_svai/releases/latest) · [Изменения v0.3.2](CHANGELOG.md) · [Статус исправлений по ревью](docs/FULL_REVIEW_RU.md)
 
-Скачайте `PileNumbering-v0.3.1-windows-x64.zip` из релиза, распакуйте в доступную для записи папку и запустите `PileNumbering.exe`. Нужны Windows x64 и Microsoft Edge WebView2 Runtime. Python и Node.js для готового EXE не требуются. Проекты, настройки и журналы сохраняются рядом с EXE; первый запуск распаковывает встроенные зависимости.
+Скачайте `PileNumbering-v0.3.2-windows-x64.zip` из релиза, распакуйте в доступную для записи папку и запустите `PileNumbering.exe`. Нужны Windows x64 и Microsoft Edge WebView2 Runtime. Python и Node.js для готового EXE не требуются. Проекты, настройки и журналы сохраняются рядом с EXE; первый запуск распаковывает встроенные зависимости.
 
 Перед обновлением закройте старое окно приложения и сохраните свои проекты. Замените EXE и иконку, сохранив папки `projects`, `config`, `data` и `autosaves`. Контрольные суммы файлов опубликованы в `SHA256SUMS.txt` релиза.
 
 Иллюстрированное руководство пользователя описывает импорт из Excel и nanoCAD, работу с группами, нумерацию, проверку и запись номеров в DWG. 17 страниц и 27 снимков интерфейса. [PDF](docs/PileNumbering_User_Guide_RU.pdf) · [Word](docs/PileNumbering_User_Guide_RU.docx)
+
+Подробный результат полного реестра PN-001–PN-074 и TD-01–TD-03: [отчёт](docs/FULL_REVIEW_RU.md). Перенос, резервные копии, API и обновление CAD-связей: [инструкция](docs/DATA_AND_API_RU.md).
 
 ## Исправления обмена и авторазбивки, сентябрь 2026
 
@@ -105,7 +107,7 @@ cd backend
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 Frontend:

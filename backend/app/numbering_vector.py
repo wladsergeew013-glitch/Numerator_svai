@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.numbering_counter import number_route
 
 from dataclasses import dataclass
 from math import hypot, isfinite
@@ -301,10 +302,5 @@ def build_vector_order(points: list[PilePoint], settings: NumberingSettings) -> 
 def apply_numbering_vector(points: list[PilePoint], settings: NumberingSettings) -> list[PilePoint]:
     result = [p.model_copy(deep=True) for p in points]
     route = build_vector_order(result, settings)
-    value = settings.startNumber
-    for point in route:
-        if point.locked or point.manualNumber:
-            continue
-        point.number = value
-        value += settings.step
+    number_route(route, settings)
     return result

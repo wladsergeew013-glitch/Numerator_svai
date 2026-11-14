@@ -1,6 +1,7 @@
+import { connectedClustersAsync } from '../utils/clusterWorker';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { previewAutoClusters } from '../api/client';
-import { connectedAutoClusters, useProjectStore } from '../store/useProjectStore';
+import { useProjectStore } from '../store/useProjectStore';
 import { CLUSTER_METHODS, DEFAULT_CLUSTER_OPTIONS, type ClusterMethod, type ClusterOptions, type ClusterPreview } from '../types/clustering';
 import type { PilePoint } from '../types/project';
 
@@ -40,7 +41,7 @@ export function AutoClusterDialog({ onClose }: { onClose: () => void }) {
     const selected = editable.filter(p => state.selectedPointIds.includes(p.id));
     return { points: structuredClone(selected.length >= 2 ? selected : editable),
       selection: selected.length >= 2,
-      pipelineId: state.project.pipelines.some(p => p.id === state.selectedPipelineId) ? state.selectedPipelineId : state.project.pipelines[0]?.id ?? null };
+      sessionId: state.projectSessionId, pipelineId: state.project.pipelines.some(p => p.id === state.selectedPipelineId) ? state.selectedPipelineId : state.project.pipelines[0]?.id ?? null };
   });
   const [options, setOptions] = useState<ClusterOptions>({ ...DEFAULT_CLUSTER_OPTIONS });
   const [result, setResult] = useState<ClusterPreview | null>(null);
@@ -80,7 +81,7 @@ export function AutoClusterDialog({ onClose }: { onClose: () => void }) {
       await new Promise(resolve => window.setTimeout(resolve, 30));
       if (ticket !== generation.current) return;
       const preview: ClusterPreview = options.method === 'connected'
-        ? { method: 'connected', clusters: connectedAutoClusters(points, options.radiusFactor).map(c => c.map(p => p.id)),
+        ? { method: 'connected', clusters: await connectedClustersAsync(points, options.radiusFactor, controller.current.signal),
           unassignedIds: [], warnings: [], pointCount: points.length, options }
         : await previewAutoClusters(points, options, controller.current.signal);
       if (ticket === generation.current) setResult(preview);
@@ -92,6 +93,7 @@ export function AutoClusterDialog({ onClose }: { onClose: () => void }) {
   };
   const apply = () => {
     if (!result || busy) return;
+    if (useProjectStore.getState().projectSessionId !== snapshot.sessionId) { setError('Проект изменился. Откройте новый предпросмотр.'); return; }
     try {
       useProjectStore.getState().applyAutoClusterPreview({ result, sourcePoints: points, pipelineId: snapshot.pipelineId });
       onClose();

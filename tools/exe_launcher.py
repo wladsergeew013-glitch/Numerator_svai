@@ -141,30 +141,13 @@ def _patch_backend_runtime_paths(app_main: Any) -> None:
     points into PyInstaller's temporary folder, so without this patch saved projects
     and UI config would disappear after restart. The browser/dev mode is untouched.
     """
-    projects_dir = APP_DIR / "projects"
-    config_dir = APP_DIR / "config"
-    data_dir = APP_DIR / "data"
-    images_dir = data_dir / "images"
-    fields_dir = data_dir / "fields"
-
-    for folder in (projects_dir, config_dir, data_dir, images_dir, fields_dir):
-        folder.mkdir(parents=True, exist_ok=True)
-
-    app_main.ROOT_DIR = APP_DIR
-    app_main.PROJECTS_DIR = projects_dir
-    app_main.CONFIG_DIR = config_dir
-    app_main.USER_CONFIG_PATH = config_dir / "user_config.json"
+    from app.runtime_paths import RuntimePaths
+    for name, value in RuntimePaths(APP_DIR).globals().items():
+        setattr(app_main, name, value)
     app_main.LOGS_DIR = LOG_DIR
-
-    # Some builds have optional asset globals. Patch them only if present.
-    for name, value in {
-        "DATA_DIR": data_dir,
-        "IMAGES_DIR": images_dir,
-        "FIELDS_DIR": fields_dir,
-        "USER_IMAGES_DIR": images_dir,
-    }.items():
-        if hasattr(app_main, name):
-            setattr(app_main, name, value)
+    for folder in (app_main.PROJECTS_DIR, app_main.CONFIG_DIR, app_main.AUTOSAVES_DIR,
+                   app_main.DATA_DIR, app_main.IMAGES_DIR, app_main.DATA_DIR / 'fields', LOG_DIR):
+        folder.mkdir(parents=True, exist_ok=True)
 
 
 def _mount_frontend(app: Any, frontend_dir: Path) -> None:
@@ -307,6 +290,9 @@ class DesktopApi:
 
     def closeConfirmed(self) -> None:  # noqa: N802
         if self._window is not None:
+            from app import cad_operations
+            if not cad_operations.shutdown(LOG_DIR / 'cad-shutdown.json'):
+                raise RuntimeError('CAD ещё завершает отменённую команду. Дождитесь подтверждения или срока её действия и повторите закрытие.')
             self._allow_close = True
             if self._panels is not None:
                 from System import Action
@@ -314,9 +300,16 @@ class DesktopApi:
             self._window.destroy()
 
     def _on_closing(self) -> bool:
-        if self._allow_close or not self._ready:
+        if self._allow_close:
             _splash_close()
             return True
+        if not self._ready:
+            from app import cad_operations
+            cad_operations.begin_shutdown()
+            if not cad_operations.is_busy():
+                _splash_close(); return True
+            threading.Thread(target=self.closeConfirmed, daemon=True, name='cad-startup-shutdown').start()
+            return False
         # FormClosing runs on the GUI thread: never wait for evaluate_js here.
         def notify() -> None:
             try:

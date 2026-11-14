@@ -15,14 +15,66 @@ import shutil
 import sys
 import tempfile
 import time
+import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 from uuid import UUID
 
 from app import cad_operations as cad
+from app.project_files import project_file_lock
 
 
 class SdkBridgeError(RuntimeError):
     pass
+
+
+_pending_requests = {}
+_pending_lock = threading.Lock()
+
+
+def _request_finished(folder: Path, deadline: float) -> bool:
+    return (folder / 'request.txt.completed').is_file() or time.time() >= deadline + 2
+
+
+def _remove_request_folder(folder: Path):
+    root = Path(tempfile.gettempdir()).resolve()
+    resolved = folder.resolve()
+    if resolved.parent != root or not resolved.name.startswith('pilenum-sdk26-'):
+        raise RuntimeError('Unsafe SDK cleanup path')
+    shutil.rmtree(resolved, ignore_errors=True)
+    with _pending_lock: _pending_requests.pop(str(resolved), None)
+
+
+@contextmanager
+def request_directory(deadline: float):
+    folder = Path(tempfile.mkdtemp(prefix='pilenum-sdk26-'))
+    try:
+        yield folder
+    finally:
+        if _request_finished(folder, deadline):
+            _remove_request_folder(folder)
+        else:
+            # Preserve both the request and its cancellation marker until native
+            # acknowledgement or expiry. SendCommand returning is not an ack.
+            (folder / 'request.txt.cancel').write_text('cancelled', encoding='ascii')
+            with _pending_lock: _pending_requests[str(folder.resolve())] = deadline
+            def reap():
+                while not _request_finished(folder, deadline): time.sleep(.1)
+                _remove_request_folder(folder)
+            threading.Thread(target=reap, daemon=True, name='sdk-request-cleanup').start()
+
+
+def await_quiescence(timeout=10.0):
+    until = time.monotonic() + timeout
+    while True:
+        with _pending_lock: requests = list(_pending_requests.items())
+        if all(_request_finished(Path(path), deadline) for path, deadline in requests): return True
+        if time.monotonic() >= until: return False
+        time.sleep(.05)
+
+
+def has_pending_requests():
+    with _pending_lock: return bool(_pending_requests)
 
 
 def _lisp_string(value: str) -> str:
@@ -77,10 +129,21 @@ def plugin_path() -> Path:
     cache.mkdir(parents=True, exist_ok=True)
     # Distinct module names allow CAD to keep earlier SDK builds loaded safely.
     target = cache / f'PileNumbering.Sdk26.{digest[:12]}.nrx'
-    if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
-        temporary = cache / (target.name + '.tmp')
-        shutil.copyfile(source, temporary)
-        temporary.replace(target)
+    with project_file_lock(target):
+        if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == digest:
+            return target  # Never replace a valid module already loaded by CAD.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=cache, suffix='.tmp', delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(source.read_bytes())
+                stream.flush()
+                os.fsync(stream.fileno())
+            if hashlib.sha256(temporary.read_bytes()).hexdigest() != digest:
+                raise SdkBridgeError('SDK-модуль изменился во время копирования. Повторите операцию.')
+            temporary.replace(target)
+        finally:
+            if temporary is not None: temporary.unlink(missing_ok=True)
     return target
 
 
@@ -120,7 +183,7 @@ class SdkChannel:
         fields = {'protocol': '1', 'module': str(module), 'deadline': str(int((time.time() + timeout) * 1000)),
                   'document': self.expected_document, 'documentSaved': '1' if self.saved else '0',
                   'documentGuid': self.guid, 'operation': operation, **values}
-        with tempfile.TemporaryDirectory(prefix='pilenum-sdk26-') as folder:
+        with request_directory(time.time() + timeout) as folder:
             request = Path(folder) / 'request.txt'
             response = Path(str(request) + '.response.json')
             completed = Path(str(request) + '.completed')
@@ -131,6 +194,16 @@ class SdkChannel:
             command = _sdk_command(module, command_name, request, capture_selection)
             cad.emit('sdk_bridge_started', operation=operation, scope=values.get('scope'), document=self.expected_document, module=str(module))
             cad.progress('Чтение через SDK nanoCAD 26' if operation in ('scan', 'read', 'identify') else 'Запись через SDK nanoCAD 26')
+            stop_monitor = threading.Event()
+            cancellation = cad.cancellation_event()
+            def monitor_cancel():
+                while not stop_monitor.wait(.02):
+                    if cancellation.is_set():
+                        try: Path(str(request) + '.cancel').write_text('cancelled', encoding='ascii')
+                        except OSError: pass
+                        return
+            monitor = threading.Thread(target=monitor_cancel, daemon=True, name='sdk-cancel-marker') if cancellation else None
+            if monitor: monitor.start()
             try:
                 self.document.SendCommand(command)
                 while True:
@@ -148,9 +221,13 @@ class SdkChannel:
             except BaseException:
                 Path(str(request) + '.cancel').write_text('cancelled', encoding='ascii')
                 raise
+            finally:
+                stop_monitor.set()
+                if monitor: monitor.join(.2)
         if payload.get('protocol') != 1:
             raise SdkBridgeError('Несовместимая версия SDK-модуля nanoCAD 26.')
         if not payload.get('ok'):
+            cad.check_cancelled()
             raise SdkBridgeError('Ошибка SDK nanoCAD 26: ' + str(payload.get('error') or 'причина не указана'))
         if document_key(str(payload.get('document') or '')) != document_key(self.expected_document):
             raise SdkBridgeError('Активный чертёж изменился во время операции SDK. Повторите сканирование.')
@@ -244,6 +321,9 @@ class SdkEntity:
     def Name(self):
         return self.data.get('name', self.ObjectName)
 
+    TechnicalType = property(lambda self: self.ObjectName)
+    DisplayName = property(lambda self: self.Name)
+
     EffectiveName = property(lambda self: self.Name)
 
     @property
@@ -311,6 +391,11 @@ class SdkDocument:
     @property
     def FullName(self):
         return self._channel.document_key
+
+    @property
+    def FingerprintGuid(self):
+        if not self._channel.guid: self._channel.call('identify')
+        return self._channel.guid
 
     def HandleToObject(self, handle):
         return SdkEntity(self._channel, self._channel.call('read', handle=handle)['object'])

@@ -1,12 +1,12 @@
 {
   "name": "pile-numbering-frontend",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
+    "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -14,7 +14,7 @@
     "react": "latest",
     "react-dom": "latest",
     "react-konva": "latest",
-    "xlsx": "latest",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zustand": "latest"
   },
   "devDependencies": {
