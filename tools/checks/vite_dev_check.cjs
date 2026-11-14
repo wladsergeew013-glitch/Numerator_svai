@@ -8,7 +8,10 @@ const root=path.resolve(__dirname,'../..');
 
 (async()=>{
   const vite=await import(pathToFileURL(path.join(root,'frontend/node_modules/vite/dist/node/index.js')).href);
-  const fixture=fs.mkdtempSync(path.join(os.tmpdir(),'pilenum-vite-fixture-'));
+  // Hosted Windows TEMP can itself use an 8.3 alias. Probe the readable
+  // canonical file path, as Vite normalizes its root to the long spelling.
+  const tempRoot=fs.realpathSync.native(os.tmpdir());
+  const fixture=fs.realpathSync.native(fs.mkdtempSync(path.join(tempRoot,'pilenum-vite-fixture-')));
   let server;
   try {
     const marker='SYNTHETIC_PILE_FIXTURE_NO_SECRET';
@@ -40,7 +43,7 @@ const root=path.resolve(__dirname,'../..');
   } finally {
     if(server)await server.close();
     const resolved=path.resolve(fixture);
-    assert.equal(path.dirname(resolved),path.resolve(os.tmpdir()));
+    assert.equal(path.dirname(resolved),path.resolve(tempRoot));
     assert.ok(path.basename(resolved).startsWith('pilenum-vite-fixture-'));
     fs.rmSync(resolved,{recursive:true,force:true});
   }
