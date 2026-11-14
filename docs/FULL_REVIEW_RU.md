@@ -141,7 +141,7 @@ Windows: 111 Python-тестов пройдены после последнег�
 
 ## EXE и постоянные данные
 
-Финальная сборка PyInstaller завершена. Версия: 0.3.2. Runtime source digest: `937cf261591017011bcbf472720ed5036860cf87ba7ee8a77e5e5a95106ae740`. Выбранная иконка: `tools/app_icon.ico`. Финальный EXE успешно собран. После остановки Computer Use клавишей Escape новые окна не открывались; bootloader/WebView2, назначенная custom icon на экране и restart окончательного EXE не объявляются проверенными. Более ранний кандидат с другим source digest запускался до дополнительного ревью, что не заменяет приёмку окончательного файла.
+Финальная сборка PyInstaller завершена. Версия: 0.3.2. Runtime source digest: `66a5a2ba55ab66d7cc92a7d0c0a3c29ca9445606bad8372a4747f1946f13b7d6`. Выбранная иконка: `tools/app_icon.ico`. Финальный EXE успешно собран. После остановки Computer Use клавишей Escape новые окна не открывались; bootloader/WebView2, назначенная custom icon на экране и restart окончательного EXE не объявляются проверенными. Более ранний кандидат с другим source digest запускался до дополнительного ревью, что не заменяет приёмку окончательного файла.
 
 ## Границы приёмки
 
@@ -162,3 +162,5 @@ PN-073: официальные [Vite Windows path advisory](https://github.com/v
 Окончательный EXE дополнительно проверен без окон: код app/launcher извлечён из его PYZ и исполнен двумя отдельными Windows Python-процессами с frozen-путями. Health/frontend/API 0.3.2, отказ без token, concurrent ownership 200/409, save → process restart → open/config/recent/custom-icon GET/autosave/ICO readback пройдены. Все постоянные пути находятся рядом с EXE. Это проверка встроенного кода с host dependencies; **не запуск bootloader и не визуальная проверка WebView2/командных иконок**. PE FileVersion/ProductVersion=0.3.2, встроено семь icon frames.
 
 Lockfile дополнен отсутствовавшими optional @emnapi/core и @emnapi/runtime 2.0.0-beta.2 для чистых npm 10.9.9 runners; ранее выбранные версии не менялись. Чистые npm ci и production build с npm 10.9.9 пройдены.
+
+Совместимость PN-054/057: dev API сохраняет имя хоста страницы (`127.0.0.1` или `localhost`), чтобы пассивные иконки получали Strict cookie при разных портах одного сайта. Runtime helper проверен для обоих имён; production bundle остаётся same-origin и не изменился. [Правило SameSite](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie#samesitesamesite-value). Защита API не ослаблена.

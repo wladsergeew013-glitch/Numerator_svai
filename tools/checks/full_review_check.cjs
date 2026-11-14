@@ -216,6 +216,8 @@ const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;
   console.log('PASS PN-006/042: delayed read/position/write cannot alter another session or edited source point; stale Canvas editor cannot save into copied IDs.');
 
   const client=load('frontend/src/api/client.ts'), requests=[];let disk=null, active=0,maxActive=0;
+  const {developmentApiBase}=declarations('frontend/src/api/client.ts',['developmentApiBase']);
+  for(const host of ['127.0.0.1','localhost'])assert.equal(new URL(developmentApiBase(host)).hostname,host,'Dev page and asset-cookie host stay on the same site');
   global.fetch=async(url,init)=>{
     if(url.endsWith('/api/session'))return {ok:true,json:async()=>({token:'fixture-token'})};
     assert.ok(url.endsWith('/api/projects/local/save'));const response=defer(), payload=JSON.parse(init.body);active++;maxActive=Math.max(maxActive,active);

@@ -4,7 +4,11 @@ import type { ClusterOptions, ClusterPreview } from '../types/clustering';
 
 // The packaged desktop UI is served by its own backend on a free port.
 // Keep the fixed development port only for Vite; production requests are same-origin.
-export const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? 'http://localhost:8000' : '');
+function developmentApiBase(hostname: string) {
+  // Strict asset cookies need the same site as the Vite page (ports may differ).
+  return `http://${hostname === '127.0.0.1' ? '127.0.0.1' : 'localhost'}:8000`;
+}
+export const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? developmentApiBase(window.location.hostname) : '');
 
 export async function previewAutoClusters(points: PilePoint[], options: ClusterOptions, signal?: AbortSignal): Promise<ClusterPreview> {
   return request('/api/clustering/preview', {
