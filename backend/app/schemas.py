@@ -180,7 +180,7 @@ class ViewSettings(BaseModel):
     numberTextBrightness: float = 1.0
     numberTextBubbleEnabled: bool = False
     showPointNumbers: bool = True
-    highlightUnnumbered: bool = True
+    highlightUnnumbered: bool = False
     showNumberingPreview: bool = True
     showGroupFlow: bool = False
     showGroupNumbers: bool = False
@@ -324,6 +324,14 @@ class PanelStateConfig(BaseModel):
     width: float | None = None
     height: float | None = None
     dock: str | None = None
+    detached: bool = False
+    zOrder: float | None = None
+
+
+class WorkspaceConfig(BaseModel):
+    windows: dict[str, bool] = Field(default_factory=dict)
+    tabs: dict[str, str] = Field(default_factory=dict)
+    lists: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class AutosaveSettingsConfig(BaseModel):
@@ -347,6 +355,7 @@ class UserConfig(BaseModel):
     commandIcons: dict[str, str] = Field(default_factory=dict)
     panels: dict[str, PanelStateConfig] = Field(default_factory=dict)
     autosaveSettings: AutosaveSettingsConfig = Field(default_factory=AutosaveSettingsConfig)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
 
 
 class UserConfigPatch(UserConfig):

@@ -1,6 +1,6 @@
 import { CSSProperties, ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { getUserConfig, saveUserConfig } from '../api/client';
+import { getUserConfig, peekUserConfig, queueUserConfigPatch } from '../api/client';
 import { GroupManagerDock } from '../types/project';
 import { beginNativePanelMove, detachPanelWindow, disposePanelWindow, nativePanelsAvailable, returnPanelWindow } from '../utils/nativePanelWindows';
 import { activatePanelRoot, registerPanelRoot } from './PanelOverlay';
@@ -38,6 +38,8 @@ interface PanelState {
   width: number;
   height: number;
   dock?: GroupManagerDock;
+  detached?: boolean;
+  zOrder?: number;
 }
 
 type ResizeMode = 'left' | 'right' | 'bottom' | 'corner';
@@ -53,15 +55,13 @@ const MAX_DOCK_WIDTH = 920;
 let panelZCounter = 5200;
 
 function nextPanelZIndex() {
-  panelZCounter += 1;
+  panelZCounter = Math.max(panelZCounter, ...Object.values(peekUserConfig().panels ?? {}).map(panel => panel.zOrder ?? 0)) + 1;
   return panelZCounter;
 }
 
 function storageKey(id: string) {
   return `pile-numbering:panel:${id}`;
 }
-
-const externalPanelSaveTimers = new Map<string, number>();
 
 async function loadExternalPanelState(id: string): Promise<Partial<PanelState> | null> {
   try {
@@ -73,7 +73,9 @@ async function loadExternalPanelState(id: string): Promise<Partial<PanelState> |
       y: typeof panel.y === 'number' ? panel.y : undefined,
       width: typeof panel.width === 'number' ? panel.width : undefined,
       height: typeof panel.height === 'number' ? panel.height : undefined,
-      dock: panel.dock === 'left' || panel.dock === 'right' || panel.dock === 'floating' ? panel.dock : undefined
+      dock: panel.dock === 'left' || panel.dock === 'right' || panel.dock === 'floating' ? panel.dock : undefined,
+      detached: panel.detached === true,
+      zOrder: typeof panel.zOrder === 'number' ? panel.zOrder : undefined
     };
   } catch {
     return null;
@@ -81,17 +83,7 @@ async function loadExternalPanelState(id: string): Promise<Partial<PanelState> |
 }
 
 function saveExternalPanelState(id: string, state: PanelState) {
-  if (typeof window === 'undefined') return;
-  const existingTimer = externalPanelSaveTimers.get(id);
-  if (existingTimer) window.clearTimeout(existingTimer);
-
-  const timer = window.setTimeout(() => {
-    saveUserConfig({ panels: { [id]: { ...state, dock: state.dock ?? 'floating' } } })
-      .catch(() => {
-        // backend config unavailable in browser fallback
-      });
-  }, 300);
-  externalPanelSaveTimers.set(id, timer);
+  queueUserConfigPatch({ panels: { [id]: { ...state, dock: state.dock ?? 'floating' } } });
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -133,6 +125,15 @@ function updateRegistry(id: string, dock: GroupManagerDock) {
     if (index >= 0) registry[index] = { id, dock };
     else registry.push({ id, dock });
   } else if (index >= 0) registry.splice(index, 1);
+  // Desired order survives closing a panel; the active registry never reserves
+  // space for an absent panel. Mount order on the next run is irrelevant.
+  const order = peekUserConfig().workspace?.lists['dock-order'] ?? [];
+  if (isDockSide(dock) && !order.includes(id)) {
+    order.push(id);
+    queueUserConfigPatch({ workspace: { lists: { 'dock-order': order } } });
+  }
+  const rank = (id: string) => order.includes(id) ? order.indexOf(id) : order.length;
+  registry.sort((a, b) => rank(a.id) - rank(b.id));
   writeRegistry(registry);
 }
 
@@ -144,14 +145,15 @@ function loadPanelState(id: string, fallback: PanelState, allowSavedDock: boolea
   if (typeof window === 'undefined') return fallback;
   try {
     const raw = window.localStorage.getItem(storageKey(id));
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw) as Partial<PanelState>;
+    const parsed = (peekUserConfig().panels?.[id] ?? (raw ? JSON.parse(raw) : {})) as Partial<PanelState>;
     return {
       x: typeof parsed.x === 'number' ? parsed.x : fallback.x,
       y: clamp(typeof parsed.y === 'number' ? parsed.y : fallback.y, Math.min(top, window.innerHeight - 40), Math.max(6, window.innerHeight - 40)),
       width: typeof parsed.width === 'number' ? parsed.width : fallback.width,
       height: typeof parsed.height === 'number' ? parsed.height : fallback.height,
-      dock: allowSavedDock && (parsed.dock === 'left' || parsed.dock === 'right' || parsed.dock === 'floating') ? parsed.dock : fallback.dock
+      dock: allowSavedDock && (parsed.dock === 'left' || parsed.dock === 'right' || parsed.dock === 'floating') ? parsed.dock : fallback.dock,
+      detached: parsed.detached === true,
+      zOrder: typeof parsed.zOrder === 'number' ? parsed.zOrder : undefined
     };
   } catch {
     return fallback;
@@ -161,7 +163,7 @@ function loadPanelState(id: string, fallback: PanelState, allowSavedDock: boolea
 function readPanelWidth(id: string, fallback = 360) {
   try {
     const raw = window.localStorage.getItem(storageKey(id));
-    const parsed = raw ? JSON.parse(raw) as Partial<PanelState> : null;
+    const parsed = peekUserConfig().panels?.[id] ?? (raw ? JSON.parse(raw) as Partial<PanelState> : null);
     const value = typeof parsed?.width === 'number' ? parsed.width : fallback;
     return clamp(value, 260, Math.max(260, Math.min(MAX_DOCK_WIDTH, window.innerWidth * 0.68)));
   } catch {
@@ -181,9 +183,9 @@ function getDockOffset(id: string, dock: DockSide) {
 
 function savePanelState(id: string, state: PanelState) {
   if (typeof window === 'undefined') return;
+  saveExternalPanelState(id, state);
   try {
     window.localStorage.setItem(storageKey(id), JSON.stringify(state));
-    saveExternalPanelState(id, state);
     window.dispatchEvent(new CustomEvent('pile-numbering-panel-resized', {
       detail: { id, width: state.width, height: state.height, dock: state.dock ?? 'floating' }
     }));
@@ -217,7 +219,7 @@ export function DraggablePanel({
   const fallback = useMemo(() => ({ x: initialX, y: initialY, width, height, dock: canUseDock ? (dock ?? 'floating' as GroupManagerDock) : 'floating' as GroupManagerDock }), [canUseDock, dock, height, initialX, initialY, width]);
   const [panelState, setPanelState] = useState<PanelState>(() => loadPanelState(id, fallback, allowSavedDock, dockOffsetTop));
   const [internalDock, setInternalDock] = useState<GroupManagerDock>(() => canUseDock ? (panelState.dock ?? 'floating') : 'floating');
-  const [panelZIndex, setPanelZIndex] = useState(nextPanelZIndex);
+  const [panelZIndex, setPanelZIndex] = useState(() => panelState.zOrder ?? nextPanelZIndex());
   const [dockPreview, setDockPreview] = useState<DockSide | null>(null);
   const [dockVersion, setDockVersion] = useState(0);
   const [nativeReady, setNativeReady] = useState(nativePanelsAvailable);
@@ -281,7 +283,13 @@ export function DraggablePanel({
   const viewportWidth = Math.max(280, window.innerWidth - 16);
   const dockMaxWidth = Math.min(viewportWidth, Math.max(minWidth, Math.min(MAX_DOCK_WIDTH, window.innerWidth * 0.68)));
 
-  const bringToFront = () => setPanelZIndex(nextPanelZIndex());
+  const bringToFront = () => {
+    const zOrder = nextPanelZIndex();
+    setPanelZIndex(zOrder);
+    setPanelState(previous => {
+      const next = { ...previous, zOrder }; savePanelState(id, next); return next;
+    });
+  };
 
   const setDockValue = (nextDock: GroupManagerDock) => {
     locallyChanged.current = true;
@@ -300,6 +308,10 @@ export function DraggablePanel({
     if (onDockChange) onDockChange(nextDock);
     else setInternalDock(nextDock);
 
+    if (isDockSide(nextDock)) {
+      const order = (peekUserConfig().workspace?.lists['dock-order'] ?? []).filter(panel => panel !== id);
+      queueUserConfigPatch({ workspace: { lists: { 'dock-order': [...order, id] } } });
+    }
     if (canUseDock) updateRegistry(id, nextDock);
     else removeFromRegistry(id);
     setDockVersion((value) => value + 1);
@@ -313,12 +325,20 @@ export function DraggablePanel({
       width: panelState.width, height: isDocked ? Math.min(760, window.innerHeight - 80) : panelState.height,
       drag, onClose,
       onReady: () => {
+        locallyChanged.current = true;
         detachedRef.current = true; detachPending.current = false;
         dragRef.current = null; resizeRef.current = null; setDockPreview(null);
+        setPanelState(previous => {
+          const next = { ...previous, detached: true }; savePanelState(id, next); return next;
+        });
         setDetached(true); removeFromRegistry(id);
       },
       onReturn: drop => {
+        locallyChanged.current = true;
         detachedRef.current = false; detachPending.current = false;
+        setPanelState(previous => {
+          const next = { ...previous, detached: false }; savePanelState(id, next); return next;
+        });
         setDetached(false); setDockPreview(null);
         if (drop) {
           const nextDock = canUseDock && drop.x < 132 ? 'left' : canUseDock && drop.x > window.innerWidth - 132 ? 'right' : 'floating';
@@ -341,9 +361,11 @@ export function DraggablePanel({
   };
   const detachRef = useRef(detach);
   detachRef.current = detach;
+  useEffect(() => {
+    if (nativeReady && panelState.detached && !detached && !detachPending.current) detachRef.current(false);
+  }, [nativeReady, panelState.detached, detached]);
 
   useEffect(() => {
-    bringToFront();
     if (canUseDock && !detached) updateRegistry(id, effectiveDock);
     else removeFromRegistry(id);
     setDockVersion((value) => value + 1);

@@ -293,10 +293,10 @@ class DesktopApi:
             from app import cad_operations
             if not cad_operations.shutdown(LOG_DIR / 'cad-shutdown.json'):
                 raise RuntimeError('CAD ещё завершает отменённую команду. Дождитесь подтверждения или срока её действия и повторите закрытие.')
-            self._allow_close = True
             if self._panels is not None:
                 from System import Action
                 self._window.native.Invoke(Action(self._panels.shutdown))
+            self._allow_close = True
             self._window.destroy()
 
     def _on_closing(self) -> bool:

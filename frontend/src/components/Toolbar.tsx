@@ -1,3 +1,4 @@
+import { useWorkspaceList, useWorkspaceTab, useWorkspaceWindow } from '../utils/workspacePreferences';
 import { RIBBON_COMMANDS } from '../utils/commandRegistry';
 import { queueProjectSave } from '../utils/projectSaves';
 import { numberingSpace } from '../utils/numberingSpace';
@@ -8,7 +9,7 @@ import { APP_VERSION } from '../version';
 import { CadOperationProgress } from './CadOperationProgress';
 import { runFileOperation } from '../utils/operationLog';
 import { ChangeEvent, CSSProperties, ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { CadOperationCancelled, exportNanoCadBlocks, exportNanoCadModelStudioObjects, getUserConfig, importCsv, importNanoCadBlocks, importNanoCadModelStudioObjects, listLocalProjects, openLocalProject, openLocalProjectLocation, pickNanoCadBlockSample, saveLocalProject, saveUserConfig, scanNanoCadBlocks, scanNanoCadModelStudioObjects, type CadProgress, type NanoCadBlockSummary, type NanoCadModelStudioObjectSummary } from '../api/client';
+import { CadOperationCancelled, exportNanoCadBlocks, exportNanoCadModelStudioObjects, getUserConfig, importCsv, importNanoCadBlocks, importNanoCadModelStudioObjects, listLocalProjects, openLocalProject, openLocalProjectLocation, pickNanoCadBlockSample, saveLocalProject, peekUserConfig, queueUserConfigPatch, scanNanoCadBlocks, scanNanoCadModelStudioObjects, type CadProgress, type NanoCadBlockSummary, type NanoCadModelStudioObjectSummary } from '../api/client';
 import { useProjectStore } from '../store/useProjectStore';
 import { assertProjectContext, captureProjectContext, isProjectSession, openProjectSafely, runProjectTransition, type ProjectContext } from '../utils/projectSession';
 import { LocalProjectInfo, PileGroup, PilePoint, PileProject } from '../types/project';
@@ -75,9 +76,12 @@ const DENSITY_PRESETS: Record<RibbonDensity, {
 };
 
 function loadToolbarHeight() {
+  const saved = peekUserConfig().toolbarHeight;
+  if (typeof saved === 'number' && Number.isFinite(saved)) return clamp(saved, MIN_TOOLBAR_HEIGHT, MAX_TOOLBAR_HEIGHT);
   if (typeof window === 'undefined') return DEFAULT_TOOLBAR_HEIGHT;
   try {
     const raw = window.localStorage.getItem(TOOLBAR_STORAGE_KEY);
+    if (raw == null) return DEFAULT_TOOLBAR_HEIGHT;
     const value = Number(raw);
     if (!Number.isFinite(value)) return DEFAULT_TOOLBAR_HEIGHT;
     return Math.min(Math.max(value, MIN_TOOLBAR_HEIGHT), MAX_TOOLBAR_HEIGHT);
@@ -464,24 +468,24 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   } = useProjectStore();
 
   const [toolbarHeight, setToolbarHeight] = useState(loadToolbarHeight);
-  const [ribbonMode, setRibbonMode] = useState<RibbonMode>(loadRibbonMode);
-  const [ribbonDensity, setRibbonDensity] = useState<RibbonDensity>(loadRibbonDensity);
-  const [activeTab, setActiveTab] = useState<RibbonTab>(loadRibbonTab);
-  const [collapsedSections, setCollapsedSections] = useState<SectionId[]>(loadCollapsedSections);
-  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [ribbonMode, setRibbonMode] = useWorkspaceTab<RibbonMode>('ribbon-mode', ['tabs', 'all'], loadRibbonMode);
+  const [ribbonDensity, setRibbonDensity] = useWorkspaceTab<RibbonDensity>('ribbon-density', ['compact', 'normal', 'comfortable'], loadRibbonDensity);
+  const [activeTab, setActiveTab] = useWorkspaceTab<RibbonTab>('ribbon-tab', ['file', 'work', 'settings', 'history'], loadRibbonTab);
+  const [collapsedSections, setCollapsedSections] = useWorkspaceList<SectionId>('ribbon-collapsed', ALL_SECTIONS, loadCollapsedSections);
+  const [workspaceOpen, setWorkspaceOpen] = useWorkspaceWindow('settings');
   const [nanoCadSettingsRequest, setNanoCadSettingsRequest] = useState(0);
-  const [aboutOpen, setAboutOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useWorkspaceWindow('about');
   const [aboutEmailCopied, setAboutEmailCopied] = useState(false);
-  const [projectsOpen, setProjectsOpen] = useState(false);
+  const [projectsOpen, setProjectsOpen] = useWorkspaceWindow('projects');
   const [localProjects, setLocalProjects] = useState<LocalProjectInfo[]>([]);
   const [projectStatus, setProjectStatus] = useState<string>('');
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [createProjectName, setCreateProjectName] = useState('Новый проект');
   const [renameProjectOpen, setRenameProjectOpen] = useState(false);
   const [renameProjectName, setRenameProjectName] = useState('');
-  const [transferPanelOpen, setTransferPanelOpen] = useState(false);
-  const [transferTab, setTransferTab] = useState<'scan' | 'import' | 'export'>('scan');
-  const [importSource, setImportSource] = useState<TransferSource>('file');
+  const [transferPanelOpen, setTransferPanelOpen] = useWorkspaceWindow('transfer');
+  const [transferTab, setTransferTab] = useWorkspaceTab('transfer-tab', ['scan', 'import', 'export'] as const, 'scan');
+  const [importSource, setImportSource] = useWorkspaceTab<TransferSource>('import-source', ['file', 'nanocad'], 'file');
   const [importPreview, setImportPreview] = useState<CsvPreviewData | null>(null);
   const [importXColumn, setImportXColumn] = useState('0');
   const [importYColumn, setImportYColumn] = useState('1');
@@ -492,7 +496,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const [importUseBasePoint, setImportUseBasePoint] = useState(false);
   const [importBaseX, setImportBaseX] = useState('0');
   const [importBaseY, setImportBaseY] = useState('0');
-  const [nanoCadMode, setNanoCadMode] = useState<'blocks' | 'model_studio'>('blocks');
+  const [nanoCadMode, setNanoCadMode] = useWorkspaceTab('cad-object-mode', ['blocks', 'model_studio'] as const, 'blocks');
   const [nanoCadBlocks, setNanoCadBlocks] = useState<NanoCadBlockSummary[]>([]);
   const [nanoCadBlockScanId, setNanoCadBlockScanId] = useState<string | null>(null);
   const [nanoCadBlockScannedAt, setNanoCadBlockScannedAt] = useState<number | null>(null);
@@ -519,8 +523,8 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const [nanoCadSelectedModelObjectNames, setNanoCadSelectedModelObjectNames] = useState<string[]>([]);
   const [nanoCadModelNumberParameterByObject, setNanoCadModelNumberParameterByObject] = useState<Record<string, string>>({});
   const [nanoCadStatus, setNanoCadStatus] = useState('');
-  const [exportTarget, setExportTarget] = useState<ExportTarget>('json');
-  const [exportNanoCadMode, setExportNanoCadMode] = useState<'blocks' | 'model_studio'>('blocks');
+  const [exportTarget, setExportTarget] = useWorkspaceTab<ExportTarget>('export-target', ['json', 'nanocad'], 'json');
+  const [exportNanoCadMode, setExportNanoCadMode] = useWorkspaceTab('cad-export-mode', ['blocks', 'model_studio'] as const, 'blocks');
   const [exportSelectedGroupIds, setExportSelectedGroupIds] = useState<string[]>([]);
   const [exportAllPoints, setExportAllPoints] = useState(false);
   const [exportUseBasePoint, setExportUseBasePoint] = useState(true);
@@ -528,8 +532,8 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const [exportBaseY, setExportBaseY] = useState('0');
   const [exportTolerance, setExportTolerance] = useState('1');
   const [exportStatus, setExportStatus] = useState('');
-  const [modelCheckOpen, setModelCheckOpen] = useState(false);
-  const [clearLinksPanelOpen, setClearLinksPanelOpen] = useState(false);
+  const [modelCheckOpen, setModelCheckOpen] = useWorkspaceWindow('model-check');
+  const [clearLinksPanelOpen, setClearLinksPanelOpen] = useWorkspaceWindow('clear-links');
   const [cadProgress, setCadProgress] = useState<CadProgress | null>(null);
   type CadSlot = 'scan' | 'import' | 'export';
   const cadSlot = useRef<CadSlot>('scan');
@@ -641,13 +645,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     } catch {
       // ignore
     }
-    const timer = window.setTimeout(() => {
-      saveUserConfig({ toolbarHeight })
-        .catch(() => {
-          // backend config unavailable in browser fallback
-        });
-    }, 250);
-    return () => window.clearTimeout(timer);
+    queueUserConfigPatch({ toolbarHeight });
   }, [onHeightChange, toolbarHeight]);
 
   useEffect(() => {

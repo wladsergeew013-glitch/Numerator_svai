@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const root = path.resolve(__dirname, '../..');
 const ts = require(path.join(root, 'frontend/node_modules/typescript'));
 const cache = new Map();
-const api = { getUserConfig: async()=>({}), saveUserConfig: async()=>({}) };
+const api = { getUserConfig: async()=>({}), saveUserConfig: async()=>({}), queueUserConfigPatch() {}, flushUserConfig:async()=>({}), peekUserConfig:()=>({}) };
 let hooks=[], cursor=0, effects=[];
 const react = {
   useState(initial) { const i=cursor++; if (!(i in hooks)) hooks[i]=typeof initial==='function'?initial():initial; return [hooks[i], value=>{hooks[i]=typeof value==='function'?value(hooks[i]):value;}]; },
@@ -53,7 +53,7 @@ function handler(file,name,deps) {
   assert.equal(found.length,1,`One ${name} implementation`);
   return new Function(...Object.keys(deps),ts.transpileModule(`return (${found[0]});`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText)(...Object.values(deps));
 }
-function pureFunctions(file,names){const source=ast(file);const text=source.statements.filter(n=>(ts.isFunctionDeclaration(n)&&!['CanvasView','DraggablePanel'].includes(n.name?.text))||ts.isVariableStatement(n)).map(n=>n.getText(source)).join('\n');return new Function(ts.transpileModule(text+`\nreturn {${names.join(',')}};`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText)();}
+function pureFunctions(file,names,deps={}){const source=ast(file);const text=source.statements.filter(n=>(ts.isFunctionDeclaration(n)&&!['CanvasView','DraggablePanel'].includes(n.name?.text))||ts.isVariableStatement(n)).map(n=>n.getText(source)).join('\n');return new Function(...Object.keys(deps),ts.transpileModule(text+`\nreturn {${names.join(',')}};`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText)(...Object.values(deps));}
 function declarations(file,names,deps={}) {
   const source=ast(file), text=source.statements.filter(n=>ts.isFunctionDeclaration(n)&&names.includes(n.name?.text)).map(n=>n.getText(source)).join('\n');
   return new Function('exports',...Object.keys(deps),ts.transpileModule(text,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText+`\nreturn {${names.join(',')}};`)({},...Object.values(deps));
@@ -115,7 +115,7 @@ const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;
   store.getState().hydrateUserConfig({viewSettings:prefs});store.getState().setProject(fixture());
   for(const [key,value] of Object.entries(prefs))assert.equal(store.getState().project.viewSettings[key],value);
   assert.deepEqual(patch.changedFields({viewSettings:{zoom:1,color:'a'}},{viewSettings:{zoom:1,color:'b'}}),{viewSettings:{color:'a'}});
-  const docks=pureFunctions('frontend/src/components/DraggablePanel.tsx',['updateRegistry','readRegistry']);docks.updateRegistry('A','left');docks.updateRegistry('B','left');docks.updateRegistry('A','left');assert.deepEqual(docks.readRegistry().map(x=>x.id),['A','B']);
+  const docks=pureFunctions('frontend/src/components/DraggablePanel.tsx',['updateRegistry','readRegistry'],{peekUserConfig:()=>({}),queueUserConfigPatch(){}});docks.updateRegistry('A','left');docks.updateRegistry('B','left');docks.updateRegistry('A','left');assert.deepEqual(docks.readRegistry().map(x=>x.id),['A','B']);
   const style=handler('frontend/src/components/DraggablePanel.tsx','style',{detached:false,isDocked:false,panelState:{x:0,y:900,width:350,height:400},viewportWidth:984,dockOffsetTop:90,minWidth:280,minHeight:200,panelZIndex:1,clamp:(v,min,max)=>Math.min(Math.max(v,min),max)});
   assert.equal(style.top,560);
   console.log('PASS PN-044/045/046/053: field patches, persistent preferences, stable dock order and reachable header.');

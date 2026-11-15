@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useProjectStore } from '../store/useProjectStore';
 import { projectSaveSignature } from '../utils/projectSaveState';
 import { captureProjectContext, type ProjectTransitionRequest } from '../utils/projectSession';
-import { saveLocalProject } from '../api/client';
+import { flushUserConfig, saveLocalProject } from '../api/client';
 
 interface DesktopBridge {
   frontendReady: () => Promise<void>;
@@ -43,9 +43,16 @@ export function CloseProjectGuard() {
       return;
     }
     closing.current = true;
-    setSaving(true); setError('Завершаю активный обмен с CAD…'); setOpen(true);
-    try { await api.closeConfirmed(); }
-    catch (e) { closing.current = false; setError(String(e)); setOpen(true); }
+    setSaving(true); setError('Сохраняю настройки и завершаю активный обмен с CAD…'); setOpen(true);
+    try {
+      await flushUserConfig();
+      window.dispatchEvent(new Event('pile-numbering:shutdown-prepared'));
+      await api.closeConfirmed();
+    }
+    catch (e) {
+      window.dispatchEvent(new Event('pile-numbering:shutdown-canceled'));
+      closing.current = false; setError(`Не удалось завершить работу: ${String(e)}`); setOpen(true);
+    }
     finally { setSaving(false); }
   };
   useEffect(() => {

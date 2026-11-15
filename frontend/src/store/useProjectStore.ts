@@ -5,7 +5,7 @@ import { validateNumbering, validateProjectPayload } from '../utils/validation';
 import { newImportPoints, reconcileCadImport, type CadImportReconciliation } from '../utils/importPoints';
 import { DEFAULT_CLUSTER_OPTIONS, type ClusterApplication } from '../types/clustering';
 import { create } from 'zustand';
-import { saveUserConfig as saveUserConfigFile, type UserConfigPayload } from '../api/client';
+import { queueUserConfigPatch, type UserConfigPayload, type WorkspaceConfig } from '../api/client';
 import {
   CAD_BASE_COLORS,
   createEmptyProject,
@@ -395,7 +395,7 @@ function applyUserConfigToEmptyProject(project: PileProject, config: UserConfig)
   };
 }
 
-function buildUserConfig(state: Pick<ProjectState, 'project' | 'groupManagerVisible' | 'groupManagerDock' | 'groupManagerCollapsed' | 'autoAssignSelection' | 'collapsedGroupIds'>): UserConfig {
+function buildUserConfig(state: ProjectState): UserConfig {
   return {
     projectName: null,
     gridSettings: state.project.gridSettings,
@@ -404,16 +404,14 @@ function buildUserConfig(state: Pick<ProjectState, 'project' | 'groupManagerVisi
     groupManagerDock: state.groupManagerDock,
     groupManagerCollapsed: state.groupManagerCollapsed,
     autoAssignSelection: state.autoAssignSelection,
-    collapsedGroupIds: state.collapsedGroupIds
+    collapsedGroupIds: state.collapsedGroupIds,
+    workspace: {
+      ...state.workspace,
+      windows: { ...state.workspace.windows, journal: state.journalVisible, 'point-info': state.pointInfoVisible,
+        editing: state.editingPanelVisible, 'group-details': Boolean(state.groupDetailsId) },
+      tabs: { ...state.workspace.tabs, 'editing-tool': state.editingTool ?? '', 'group-details-group': state.groupDetailsId ?? '' }
+    }
   };
-}
-
-async function mergeAndSaveUserConfig(config: UserConfig) {
-  try {
-    await saveUserConfigFile(config);
-  } catch {
-    // Backend config can be unavailable in pure static/browser fallback.
-  }
 }
 
 function sanitizeGroupsNumbering(groups: PileGroup[], points: PilePoint[]): PileGroup[] {
@@ -1724,6 +1722,8 @@ interface ProjectState {
   redo: () => void;
 
   hydrateUserConfig: (config: UserConfigPayload) => void;
+  workspace: WorkspaceConfig;
+  updateWorkspace: (patch: Partial<WorkspaceConfig>) => void;
   setProject: (project: PileProject) => void;
   openProjectFromFile: (project: PileProject, fileName: string) => void;
   startNewProjectFromImport: (fileName: string, points: PilePoint[]) => void;
@@ -1837,16 +1837,20 @@ interface ProjectState {
 
 const startupConfig = loadUserConfig();
 const startupProject = applyUserConfigToEmptyProject(createEmptyProject(), startupConfig);
+let hydratingConfig = false;
 
-function projectSessionState(project: PileProject) {
+function projectSessionState(project: PileProject, state: ProjectState) {
   const selectedGroup = project.groups[0] ?? null;
+  const detailsOpen = Boolean(state.groupDetailsId) || state.workspace.windows['group-details'];
+  const detailsId = state.groupDetailsId || state.workspace.tabs['group-details-group'];
   return {
     project, projectSessionId: crypto.randomUUID(),
     selectedPointIds: [], selectedGroupId: selectedGroup?.id ?? null,
     selectedPipelineId: selectedGroup?.pipelineId ?? project.pipelines[0]?.id ?? null,
-    history: [], redoStack: [], journalSnapshots: {}, collapsedGroupIds: [],
-    groupDetailsId: null, allGroupsOrderVisible: false,
-    editingTool: null, editPointPickMode: null, copyBasePoint: null,
+    history: [], redoStack: [], journalSnapshots: {},
+    groupDetailsId: detailsOpen ? (project.groups.find(group => group.id === detailsId)?.id ?? selectedGroup?.id ?? null) : null,
+    allGroupsOrderVisible: false,
+    editPointPickMode: null, copyBasePoint: null,
     copyBasePointId: null, propertySourcePointId: null,
     numberingPreview: EMPTY_NUMBERING_PREVIEW, numberingPickMode: null,
     numberingLinkFromId: null, numberingLinkToId: null,
@@ -1872,13 +1876,19 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     return true;
   },
   groupDetailsId: null,
-  openGroupDetails: (id) => { if (!get().project.groups.some(group => group.id === id)) return; get().setSelectedGroup(id); set({ groupDetailsId: id }); },
-  closeGroupDetails: () => set({ groupDetailsId: null }),
+  openGroupDetails: (id) => {
+    if (!get().project.groups.some(group => group.id === id)) return;
+    get().setSelectedGroup(id);
+    set(state => ({ groupDetailsId: id, workspace: mergePatch(state.workspace,
+      { windows: { 'group-details': true }, tabs: { 'group-details-group': id } }) as WorkspaceConfig }));
+  },
+  closeGroupDetails: () => set(state => ({ groupDetailsId: null, workspace: mergePatch(state.workspace,
+    { windows: { 'group-details': false }, tabs: { 'group-details-group': '' } }) as WorkspaceConfig })),
   allGroupsOrderVisible: false,
   selectedPointIds: [],
   selectedGroupId: null,
   selectedPipelineId: startupProject.pipelines[0]?.id ?? null,
-  groupManagerVisible: startupConfig.groupManagerVisible ?? true,
+  groupManagerVisible: startupConfig.groupManagerVisible ?? false,
   groupManagerDock: normalizeDock(startupConfig.groupManagerDock) ?? 'floating',
   groupManagerCollapsed: startupConfig.groupManagerCollapsed ?? false,
   autoAssignSelection: startupConfig.autoAssignSelection ?? true,
@@ -1906,16 +1916,27 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   redoStack: [],
   journalSnapshots: {},
   settingsHoverTarget: null,
+  workspace: { windows: {}, tabs: {}, lists: {} },
+  updateWorkspace: (patch) => set(state => ({ workspace: mergePatch(state.workspace, patch) as WorkspaceConfig })),
 
   hydrateUserConfig: (config) => {
+    hydratingConfig = true;
+    try {
     set((state) => ({
       project: applyUserConfigToEmptyProject(state.project, config as UserConfig),
       groupManagerVisible: typeof config.groupManagerVisible === 'boolean' ? config.groupManagerVisible : state.groupManagerVisible,
       groupManagerDock: normalizeDock(config.groupManagerDock) ?? state.groupManagerDock,
       groupManagerCollapsed: typeof config.groupManagerCollapsed === 'boolean' ? config.groupManagerCollapsed : state.groupManagerCollapsed,
       autoAssignSelection: typeof config.autoAssignSelection === 'boolean' ? config.autoAssignSelection : state.autoAssignSelection,
-      collapsedGroupIds: Array.isArray(config.collapsedGroupIds) ? config.collapsedGroupIds : state.collapsedGroupIds
+      collapsedGroupIds: Array.isArray(config.collapsedGroupIds) ? config.collapsedGroupIds : state.collapsedGroupIds,
+      workspace: mergePatch(state.workspace, config.workspace ?? {}) as WorkspaceConfig,
+      journalVisible: config.workspace?.windows.journal ?? state.journalVisible,
+      pointInfoVisible: config.workspace?.windows['point-info'] ?? state.pointInfoVisible,
+      editingPanelVisible: config.workspace?.windows.editing ?? state.editingPanelVisible,
+      editingTool: (['create', 'move', 'copy', 'props'].includes(config.workspace?.tabs['editing-tool'] ?? '')
+        ? config.workspace?.tabs['editing-tool'] : null) as EditingTool
     }));
+    } finally { hydratingConfig = false; }
   },
 
   pushHistory: () => {
@@ -1979,7 +2000,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setProject: (project) => {
     const normalized = normalizeProject(project, get().project);
-    set({ ...projectSessionState(normalized), savedProjectSignature: projectSaveSignature(normalized) });
+    set({ ...projectSessionState(normalized, get()), savedProjectSignature: projectSaveSignature(normalized) });
     get().recordOperation('project_opened', { name: normalized.project.name, points: normalized.points.length, groups: normalized.groups.length, fileName: normalized.project.fileName ?? null });
   },
 
@@ -1993,10 +2014,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         name: project.project.name && project.project.name !== 'Untitled project' ? project.project.name : fileBaseName(fileName)
       }
     }, get().project);
-    set({ ...projectSessionState(normalized), savedProjectSignature: projectSaveSignature(normalized) });
+    set({ ...projectSessionState(normalized, get()), savedProjectSignature: projectSaveSignature(normalized) });
     get().recordOperation('project_opened', { name: normalized.project.name, points: normalized.points.length, groups: normalized.groups.length, fileName });
     get().markProjectSaved();
-    set({ groupDetailsId: null, allGroupsOrderVisible: false });
+    set({ allGroupsOrderVisible: false });
   },
 
   startNewProjectFromImport: (fileName, points) => {
@@ -2023,7 +2044,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       },
       operations: []
     };
-    set({ ...projectSessionState(nextProject), savedProjectSignature: '' });
+    set({ ...projectSessionState(nextProject, get()), savedProjectSignature: '' });
     get().recordOperation('csv_imported', { points: points.length, sourceFileName: fileName, name: projectName });
   },
 
@@ -2045,7 +2066,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       viewSettings: current.viewSettings,
       operations: []
     };
-    set({ ...projectSessionState(nextProject), savedProjectSignature: '' });
+    set({ ...projectSessionState(nextProject, get()), savedProjectSignature: '' });
     get().recordOperation('project_created', { name: cleanName });
   },
 
@@ -3625,8 +3646,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   }
 }));
 
-let configSaveTimer: ReturnType<typeof setTimeout> | null = null;
-
 useProjectStore.subscribe((state, previous) => {
   if (state.project.operations === previous.project.operations) return;
   const ids = new Set(state.project.operations.slice(-80).map(op => op.id));
@@ -3634,16 +3653,11 @@ useProjectStore.subscribe((state, previous) => {
   if (entries.length !== Object.keys(state.journalSnapshots).length) useProjectStore.setState({ journalSnapshots: Object.fromEntries(entries) });
 });
 
-let pendingConfig: UserConfig = {};
 useProjectStore.subscribe((state, previous) => {
+  if (hydratingConfig) return;
   const patch = changedFields(buildUserConfig(state), buildUserConfig(previous));
   if (!Object.keys(patch).length) return;
-  pendingConfig = mergePatch(pendingConfig, patch);
-  if (configSaveTimer) clearTimeout(configSaveTimer);
-  configSaveTimer = setTimeout(() => {
-    const current = pendingConfig; pendingConfig = {};
-    void mergeAndSaveUserConfig(current);
-  }, 250);
+  queueUserConfigPatch(patch);
 });
 
 // A draft is cancelled synchronously when its document or group loses ownership.

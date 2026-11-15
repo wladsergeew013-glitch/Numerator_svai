@@ -27,7 +27,7 @@ const api = {
   CadOperationCancelled: class extends Error {},
   scanNanoCadModelStudioObjects: async scope => ({scanId:`scan-${scope}`, scope:scope === 'selection' ? scope : 'all', objects:scope === 'selection' ? [item('Pile-A')] : [item('Pile-A'), item('Pile-B')]}),
   importNanoCadModelStudioObjects: async params => { requests.push(params); return {points:[]}; },
-  getUserConfig: async () => ({}), saveUserConfig: async () => ({}),
+  getUserConfig: async () => ({}), saveUserConfig: async () => ({}), queueUserConfigPatch() {}, peekUserConfig:()=>({}),
 };
 let store;
 function load(file) {
@@ -59,7 +59,7 @@ function load(file) {
 global.window = {innerWidth:1500, innerHeight:950, localStorage:{getItem:() => null, setItem() {}}, setTimeout, clearTimeout};
 global.requestAnimationFrame = fn => fn();
 const {createEmptyProject} = load(path.join(root,'frontend/src/types/project.ts'));
-store = new Proxy({project:createEmptyProject(), projectSessionId:'test-session', selectedPointIds:[], manualLinkClearSelection:[],
+store = new Proxy({workspace:{windows:{},tabs:{},lists:{}}, updateWorkspace(patch){for (const key of Object.keys(patch)) Object.assign(store.workspace[key],patch[key]);}, project:createEmptyProject(), projectSessionId:'test-session', selectedPointIds:[], manualLinkClearSelection:[],
   numberingPreview:{visible:false}, syncCadImportedPoints:() => ({added:[], moved:[], linked:[], renumbered:[], unchanged:0})},
   {get:(target,key) => key in target ? target[key] : () => {}});
 const {Toolbar} = load(path.join(root,'frontend/src/components/Toolbar.tsx'));

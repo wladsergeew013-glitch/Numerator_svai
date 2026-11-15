@@ -10,7 +10,7 @@ const compiled = ts.transpileModule(source, { compilerOptions: {
   module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
 } }).outputText;
 
-function mount(api) {
+function mount(api, flushUserConfig = async () => ({})) {
   const window = new EventTarget();
   let nextFrame = 0;
   const frames = new Map();
@@ -22,7 +22,7 @@ function mount(api) {
   const errors = [];
   const states = [];
   const context = {
-    exports: {}, window, console: { error: (...args) => errors.push(args) },
+    exports: {}, window, Event, console: { error: (...args) => errors.push(args) },
     require(name) {
       if (name === 'react') return {
         useEffect: fn => effects.push(fn), useRef: value => ({ current: value }),
@@ -32,7 +32,7 @@ function mount(api) {
       if (name.endsWith('/useProjectStore')) return { useProjectStore: { getState: () => ({ project: 'saved', savedProjectSignature: 'saved' }) } };
       if (name.endsWith('/projectSaveState')) return { projectSaveSignature: value => value };
       if (name.endsWith('/projectSession')) return { captureProjectContext: () => ({sessionId:'test'}) };
-      if (name.endsWith('/api/client')) return {};
+      if (name.endsWith('/api/client')) return {flushUserConfig};
       throw new Error(`Unexpected import ${name}`);
     },
   };
@@ -93,5 +93,19 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
   unmounted.paint();
   await settle();
   assert.equal(readyCalls, 2, 'Unmount must cancel pending readiness frames');
+  let releaseFlush, durable = false, guardedCloses = 0;
+  const closing = mount({closeConfirmed:async()=>{assert.ok(durable); guardedCloses++;}},
+    () => new Promise(resolve=>{releaseFlush=()=>{durable=true;resolve({});};}));
+  closing.window.dispatchEvent(new Event('pile-numbering:close-requested'));
+  await settle();
+  assert.equal(guardedCloses,0,'Native destruction waits for durable preferences');
+  releaseFlush(); await settle();
+  assert.equal(guardedCloses,1); closing.cleanup();
+  const saveFailure = mount({closeConfirmed:async()=>{guardedCloses++;}},async()=>{throw new Error('disk full');});
+  saveFailure.window.dispatchEvent(new Event('pile-numbering:close-requested'));
+  await settle();
+  assert.equal(guardedCloses,1,'A failed preference save must keep the window open');
+  assert.ok(saveFailure.states.some(value=>typeof value==='string'&&value.includes('disk full')));
+  saveFailure.cleanup();
   console.log('Desktop startup regression checks passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
