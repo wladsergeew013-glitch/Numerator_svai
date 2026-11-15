@@ -11,6 +11,7 @@ type PanelWindow = {
 };
 
 const panels = new Map<string, PanelWindow>();
+let shuttingDown = false;
 type DesktopWindow = Window & {
   pileNativePanelsReady?: boolean;
   pywebview?: { api?: { startPanelMove?: (id: string) => Promise<void> } };
@@ -21,6 +22,7 @@ export function nativePanelsAvailable() {
 }
 
 function restore(id: string, drop?: Drop) {
+  if (shuttingDown) return;
   const panel = panels.get(id);
   if (!panel) return;
   panels.delete(id);
@@ -85,6 +87,8 @@ const callbacks = {
 };
 if (typeof window !== 'undefined') {
   (window as unknown as { __pilePanels: typeof callbacks }).__pilePanels = callbacks;
+  window.addEventListener('pile-numbering:shutdown-prepared', () => { shuttingDown = true; });
+  window.addEventListener('pile-numbering:shutdown-canceled', () => { shuttingDown = false; });
 }
 
 export function detachPanelWindow(options: {

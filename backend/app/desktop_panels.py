@@ -11,6 +11,7 @@ import logging
 import re
 from pathlib import Path
 from urllib.parse import parse_qs
+from app.project_files import atomic_write_project, project_file_lock
 
 
 def parse_panel_request(uri: str) -> dict | None:
@@ -25,12 +26,12 @@ def parse_panel_request(uri: str) -> dict | None:
             'drag': values.get('drag', ['0'])[0] == '1'}
 
 
-def visible_bounds(bounds: dict, areas: list[dict], fallback: dict) -> dict:
+def visible_bounds(bounds: dict, areas: list[dict], fallback: dict, *, minimum=(260, 180), maximum=(2400, 2000)) -> dict:
     """Keep a usable title strip on a currently connected monitor."""
     try:
         result = {key: int(bounds[key]) for key in ('x', 'y', 'width', 'height')}
-        result['width'] = max(260, min(2400, result['width']))
-        result['height'] = max(180, min(2000, result['height']))
+        result['width'] = max(minimum[0], min(maximum[0], result['width']))
+        result['height'] = max(minimum[1], min(maximum[1], result['height']))
         for area in areas:
             if (min(result['x'] + result['width'], area['x'] + area['width']) - max(result['x'], area['x']) >= 100
                     and area['y'] <= result['y'] < area['y'] + area['height'] - 35):
@@ -40,12 +41,29 @@ def visible_bounds(bounds: dict, areas: list[dict], fallback: dict) -> dict:
     return dict(fallback)
 
 
+def read_window_layout(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        return {key: value for key, value in data.items() if isinstance(value, dict)} if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_window_bounds(path: Path, window_id: str, bounds: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with project_file_lock(path):
+        values = read_window_layout(path)
+        values[window_id] = bounds
+        atomic_write_project(path, json.dumps(values, ensure_ascii=False, indent=2))
+
+
 class NativePanelWindows:
     def __init__(self, window, config_dir: Path):
         self.window = window
         self.config_file = config_dir / 'detached_windows.json'
         self.panels = {}
         self.shutting_down = False
+        self.dirty_bounds = {}
 
     def install(self):
         # Called on the WinForms thread after pywebview's main WebView is ready.
@@ -61,6 +79,12 @@ class NativePanelWindows:
         self.original_handler = self.browser.on_new_window_request
         self.core.NewWindowRequested -= self.original_handler
         self.core.NewWindowRequested += self._new_window
+        self.bounds_timer = forms.Timer()
+        self.bounds_timer.Interval = 200
+        self.bounds_timer.Tick += self._flush_bounds
+        self._restore_main_bounds()
+        self.owner.Move += lambda *_: self._queue_bounds('__main__', self.owner)
+        self.owner.Resize += lambda *_: self._queue_bounds('__main__', self.owner)
         self.owner.FormClosed += self._main_closed
         self._notify("window.pileNativePanelsReady=true;window.dispatchEvent(new Event('pile-native-panels-ready'))")
         logging.info('Native panel windows ready (shared WebView2 environment)')
@@ -74,24 +98,57 @@ class NativePanelWindows:
         self._notify(f'window.__pilePanels?.{name}({payload})')
 
     def _saved_bounds(self):
-        try:
-            data = json.loads(self.config_file.read_text(encoding='utf-8'))
-            return data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
-            return {}
+        return read_window_layout(self.config_file)
 
-    def _save_bounds(self, panel_id, form):
-        if self.shutting_down or form.WindowState != self.forms.FormWindowState.Normal:
+    def _areas(self):
+        return [{'x': screen.WorkingArea.X, 'y': screen.WorkingArea.Y,
+                 'width': screen.WorkingArea.Width, 'height': screen.WorkingArea.Height}
+                for screen in self.forms.Screen.AllScreens]
+
+    def _restore_main_bounds(self):
+        saved = self._saved_bounds().get('__main__')
+        if not isinstance(saved, dict):
+            return  # First launch keeps the existing maximized default.
+        area = self.forms.Screen.FromControl(self.owner).WorkingArea
+        fallback = {'x': area.X, 'y': area.Y, 'width': min(1500, area.Width), 'height': min(950, area.Height)}
+        bounds = visible_bounds(saved, self._areas(), fallback, minimum=(1100, 700), maximum=(16384, 16384))
+        self.owner.WindowState = self.forms.FormWindowState.Normal
+        self.owner.StartPosition = self.forms.FormStartPosition.Manual
+        self.owner.Location = self.Point(bounds['x'], bounds['y'])
+        self.owner.Size = self.Size(bounds['width'], bounds['height'])
+        if saved.get('state') == 'maximized':
+            self.owner.WindowState = self.forms.FormWindowState.Maximized
+
+    def _save_bounds(self, panel_id, form, *, strict=False):
+        if form.IsDisposed:
             return
-        values = self._saved_bounds()
-        values[panel_id] = {'x': form.Left, 'y': form.Top, 'width': form.Width, 'height': form.Height}
+        normal = form.WindowState == self.forms.FormWindowState.Normal
+        rect = form.Bounds if normal else form.RestoreBounds
+        old = self._saved_bounds().get(panel_id, {})
+        state = ('normal' if normal else 'maximized' if form.WindowState == self.forms.FormWindowState.Maximized
+                 else old.get('state', 'normal'))
+        bounds = {'x': rect.X, 'y': rect.Y, 'width': rect.Width, 'height': rect.Height, 'state': state}
+        if old == bounds:
+            return
         try:
-            self.config_file.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.config_file.with_suffix('.json.tmp')
-            temporary.write_text(json.dumps(values, ensure_ascii=False, indent=2), encoding='utf-8')
-            temporary.replace(self.config_file)
-        except OSError:
-            logging.exception('Could not save detached panel bounds')
+            save_window_bounds(self.config_file, panel_id, bounds)
+        except (OSError, TimeoutError):
+            logging.exception('Could not save window bounds: %s', panel_id)
+            if strict:
+                raise
+
+    def _queue_bounds(self, panel_id, form):
+        if self.shutting_down:
+            return
+        self.dirty_bounds[panel_id] = form
+        self.bounds_timer.Stop()
+        self.bounds_timer.Start()
+
+    def _flush_bounds(self, *_):
+        self.bounds_timer.Stop()
+        dirty, self.dirty_bounds = self.dirty_bounds, {}
+        for panel_id, form in dirty.items():
+            self._save_bounds(panel_id, form)
 
     def _new_window(self, sender, args):
         request = parse_panel_request(str(args.Uri))
@@ -121,9 +178,7 @@ class NativePanelWindows:
         cursor = self.forms.Cursor.Position
         fallback = {'x': cursor.X - int(70 * scale), 'y': cursor.Y - int(16 * scale),
                     'width': max(280, width), 'height': max(220, height)}
-        areas = [{'x': screen.WorkingArea.X, 'y': screen.WorkingArea.Y,
-                  'width': screen.WorkingArea.Width, 'height': screen.WorkingArea.Height}
-                 for screen in self.forms.Screen.AllScreens]
+        areas = self._areas()
         if not request['drag']:
             bounds = visible_bounds(self._saved_bounds().get(panel_id, {}), areas, fallback)
         else:
@@ -162,6 +217,8 @@ class NativePanelWindows:
                 args.NewWindow = child
                 deferral.Complete()
                 form.Show()
+                if not request['drag'] and self._saved_bounds().get(panel_id, {}).get('state') == 'maximized':
+                    form.WindowState = self.forms.FormWindowState.Maximized
                 self._event('nativeReady', panel_id)
                 if request['drag']:
                     form.BeginInvoke(self.Action(lambda: self._begin_move(panel_id, only_if_pressed=True)))
@@ -173,13 +230,14 @@ class NativePanelWindows:
                 self._close(panel_id)
 
         def closing(_, event):
+            self._save_bounds(panel_id, form)
             if not record['closing'] and not self.shutting_down:
                 # Move the live portal back before disposing its document.
                 event.Cancel = True
                 self._event('closePanel', panel_id)
 
         def closed(*_):
-            self._save_bounds(panel_id, form)
+            self.dirty_bounds.pop(panel_id, None)
             self.panels.pop(panel_id, None)
             view.Dispose()
             logging.info('Panel returned/closed: %s', panel_id)
@@ -203,6 +261,8 @@ class NativePanelWindows:
         form.FormClosed += closed
         form.ResizeBegin += move_begin
         form.Move += move_progress
+        form.Move += lambda *_: self._queue_bounds(panel_id, form)
+        form.Resize += lambda *_: self._queue_bounds(panel_id, form)
         form.ResizeEnd += move_end
         view.CoreWebView2InitializationCompleted += ready
         # Create the native handle without navigating the new WebView.
@@ -241,6 +301,14 @@ class NativePanelWindows:
             record['form'].Close()
 
     def shutdown(self):
+        if self.shutting_down:
+            return
+        # Save BEFORE closing windows; RestoreBounds retains the normal size of
+        # maximized windows. A minimized state never becomes the next startup.
+        self._save_bounds('__main__', self.owner, strict=True)
+        for panel_id, record in self.panels.items():
+            self._save_bounds(panel_id, record['form'], strict=True)
+        self.bounds_timer.Stop()
         self.shutting_down = True
         for panel_id in list(self.panels):
             self._close(panel_id)

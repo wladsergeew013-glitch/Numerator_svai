@@ -6,7 +6,7 @@ const Module = require('node:module');
 const root = path.resolve(__dirname, '../..');
 const ts = require(path.join(root, 'frontend/node_modules/typescript'));
 const cache = new Map();
-const api = {getUserConfig:async()=>({}), saveUserConfig:async()=>({})};
+const api = {getUserConfig:async()=>({}), saveUserConfig:async()=>({}), queueUserConfigPatch() {}, flushUserConfig:async()=>({}), peekUserConfig:()=>({})};
 let hooks = [], cursor = 0, effects = [];
 const react = {
   useState(initial) {

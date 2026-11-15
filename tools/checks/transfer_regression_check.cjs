@@ -14,7 +14,7 @@ function load(file) {
   mod.paths = Module._nodeModulePaths(path.dirname(file));
   const originalRequire = mod.require.bind(mod);
   mod.require = (name) => {
-    if (name.endsWith('/api/client')) return { saveUserConfig: async () => ({}), getUserConfig: async () => ({}) };
+    if (name.endsWith('/api/client')) return { saveUserConfig: async () => ({}), getUserConfig: async () => ({}), queueUserConfigPatch() {} };
     if (name.startsWith('.')) return load(path.resolve(path.dirname(file), name + '.ts'));
     return originalRequire(name);
   };

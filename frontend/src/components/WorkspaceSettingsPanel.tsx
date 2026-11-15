@@ -1,9 +1,10 @@
+import { useWorkspaceTab } from '../utils/workspacePreferences';
 import { changedFields } from '../utils/configPatch';
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { DraggablePanel } from './DraggablePanel';
 import { useProjectStore } from '../store/useProjectStore';
 import { SELECTION_DRAG_MODE_DESCRIPTIONS, SELECTION_DRAG_MODE_LABELS, SelectionDragMode, WORKSPACE_BACKGROUND_COLORS } from '../types/project';
-import { createDesktopShortcut, deleteUserIcon, getUserConfig, listUserIcons, resolveApiAssetUrl, saveUserConfig, selectAutosaveFolder, uploadApplicationIcon, uploadUserIcon, type AutosaveSettingsPayload, type NanoCadVersion, UserIconInfo } from '../api/client';
+import { createDesktopShortcut, deleteUserIcon, getUserConfig, listUserIcons, resolveApiAssetUrl, registerConfigDraftFlusher, saveUserConfig, selectAutosaveFolder, uploadApplicationIcon, uploadUserIcon, type AutosaveSettingsPayload, type NanoCadVersion, UserIconInfo } from '../api/client';
 import { RIBBON_COMMANDS, RibbonCommandId, getRibbonCommandDefaultIcon } from '../utils/commandRegistry';
 import { makeUiSettingsFile, parseUiSettingsFile } from '../utils/projectFiles';
 
@@ -82,10 +83,12 @@ function DebouncedColorInput({
   const [draft, setDraft] = useState(normalized);
   const timerRef = useRef<number | null>(null);
   const lastCommittedRef = useRef(normalized);
+  const draftRef = useRef(normalized);
 
   useEffect(() => {
     const next = toHexColor(value, fallback);
     if (next !== lastCommittedRef.current) {
+      draftRef.current = next;
       setDraft(next);
       lastCommittedRef.current = next;
     }
@@ -99,6 +102,14 @@ function DebouncedColorInput({
     onChange(next);
   };
 
+  const commitRef = useRef(commit);
+  commitRef.current = commit;
+  useEffect(() => {
+    const flush = () => commitRef.current(draftRef.current);
+    const unregister = registerConfigDraftFlusher(flush);
+    return () => { flush(); unregister(); };
+  }, []);
+
   return (
     <input
       type="color"
@@ -106,6 +117,7 @@ function DebouncedColorInput({
       value={draft}
       onChange={(event) => {
         const next = event.target.value;
+        draftRef.current = next;
         setDraft(next);
         if (timerRef.current != null) window.clearTimeout(timerRef.current);
         timerRef.current = window.setTimeout(() => commit(next), 140);
@@ -117,7 +129,7 @@ function DebouncedColorInput({
 
 export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight, nanoCadTabRequest = 0 }: Props) {
   const { project, setBackground, updateGridSettings, updateViewSettings, setSettingsHoverTarget } = useProjectStore();
-  const [tab, setTab] = useState<SettingsTab>('numbers');
+  const [tab, setTab] = useWorkspaceTab<SettingsTab>('settings-tab', SETTINGS_TABS.map(item => item.id), 'numbers');
   useEffect(() => {
     if (nanoCadTabRequest > 0) setTab('nanocad');
   }, [nanoCadTabRequest]);

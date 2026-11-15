@@ -343,7 +343,7 @@ export function createEmptyProject(): PileProject {
       numberTextBrightness: 1,
       numberTextBubbleEnabled: false,
       showPointNumbers: true,
-      highlightUnnumbered: true,
+      highlightUnnumbered: false,
       dimOtherGroups: false,
       showNumberingPreview: true,
       showGroupFlow: false,

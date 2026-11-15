@@ -35,6 +35,7 @@ function loadToolbarHeight() {
   if (typeof window === 'undefined') return DEFAULT_TOOLBAR_HEIGHT;
   try {
     const raw = window.localStorage.getItem('pile-numbering:toolbar-height');
+    if (raw == null) return DEFAULT_TOOLBAR_HEIGHT;
     const value = Number(raw);
     if (!Number.isFinite(value)) return DEFAULT_TOOLBAR_HEIGHT;
     return Math.min(Math.max(value, 118), 280);
@@ -73,6 +74,9 @@ function normalizeAutosaveSettings(settings?: AutosaveSettingsPayload | null): R
 
 export default function App() {
   const [startupOpen, setStartupOpen] = useState(true);
+  const [configReady, setConfigReady] = useState(false);
+  const [configError, setConfigError] = useState('');
+  const [configAttempt, setConfigAttempt] = useState(0);
   const {
     appendImportedPoints,
     hydrateUserConfig,
@@ -120,6 +124,7 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    setConfigError('');
     getUserConfig()
       .then((config) => {
         if (cancelled) return;
@@ -128,14 +133,15 @@ export default function App() {
           setToolbarHeight(Math.min(Math.max(config.toolbarHeight, 118), 280));
         }
         setAutosaveSettings(normalizeAutosaveSettings(config.autosaveSettings));
+        setConfigReady(true);
       })
-      .catch(() => {
-        // Browser-only fallback keeps using localStorage. EXE uses config/user_config.json through backend.
+      .catch((error) => {
+        if (!cancelled) setConfigError(`Не удалось загрузить настройки: ${error instanceof Error ? error.message : String(error)}`);
       });
     return () => {
       cancelled = true;
     };
-  }, [hydrateUserConfig]);
+  }, [hydrateUserConfig, configAttempt]);
 
   useEffect(() => {
     const onSettingsChanged = (event: Event) => {
@@ -283,6 +289,9 @@ export default function App() {
     }
   }, [appendImportedPoints, canvasWidth, canvasHeight, zoomExtents]);
 
+  if (!configReady) return <><div role="status" className="startup-screen">{configError
+    ? <div><p>{configError}</p><button className="btn" onClick={() => setConfigAttempt(attempt => attempt + 1)}>Повторить</button></div>
+    : 'Загрузка настроек…'}</div><CloseProjectGuard /></>;
   if (startupOpen) return <><StartupScreen onReady={() => setStartupOpen(false)} /><CloseProjectGuard /></>;
 
   return (

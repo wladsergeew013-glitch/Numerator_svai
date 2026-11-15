@@ -1,6 +1,7 @@
 import { LocalProjectInfo, RecentProjectInfo, NumberingSettings, PileGroup, PilePoint, PileProject } from '../types/project';
 import { queueProjectSave } from '../utils/projectSaves';
 import type { ClusterOptions, ClusterPreview } from '../types/clustering';
+import { mergePatch } from '../utils/configPatch';
 
 // The packaged desktop UI is served by its own backend on a free port.
 // Keep the fixed development port only for Vite; production requests are same-origin.
@@ -177,6 +178,14 @@ export interface PanelStateConfig {
   width?: number | null;
   height?: number | null;
   dock?: string | null;
+  detached?: boolean;
+  zOrder?: number | null;
+}
+
+export interface WorkspaceConfig {
+  windows: Record<string, boolean>;
+  tabs: Record<string, string>;
+  lists: Record<string, string[]>;
 }
 
 export interface AutosaveSettingsPayload {
@@ -201,21 +210,74 @@ export interface UserConfigPayload {
   toolbarHeight?: number | null;
   panels?: Record<string, PanelStateConfig>;
   autosaveSettings?: AutosaveSettingsPayload;
+  workspace?: WorkspaceConfig;
 }
+
+let cachedUserConfig: UserConfigPayload = {};
+let localConfigIntent: UserConfigPatchPayload = {};
+export function peekUserConfig(): UserConfigPayload { return cachedUserConfig; }
 
 export async function getUserConfig(): Promise<UserConfigPayload> {
-  return request<UserConfigPayload>('/api/config/user');
+  const config = await request<UserConfigPayload>('/api/config/user');
+  // A late GET must not undo changes made while it was in flight.
+  cachedUserConfig = mergePatch(config, localConfigIntent);
+  return cachedUserConfig;
 }
 
-let configQueue: Promise<unknown> = Promise.resolve();
-export type UserConfigPatchPayload = Omit<UserConfigPayload, 'commandIcons'> & { commandIcons?: Record<string, string | null> };
+export type UserConfigPatchPayload = Omit<UserConfigPayload, 'commandIcons' | 'workspace'> & {
+  commandIcons?: Record<string, string | null>;
+  workspace?: Partial<WorkspaceConfig>;
+};
+let pendingConfig: UserConfigPatchPayload = {};
+let configTimer: ReturnType<typeof setTimeout> | undefined;
+let configWrite: Promise<UserConfigPayload> | undefined;
+const draftFlushers = new Set<() => void>();
+
+export function registerConfigDraftFlusher(flush: () => void) {
+  draftFlushers.add(flush);
+  return () => { draftFlushers.delete(flush); };
+}
+
+export function queueUserConfigPatch(config: UserConfigPatchPayload) {
+  // Snapshot at call time, including nested arrays/objects.
+  const patch = JSON.parse(JSON.stringify(config)) as UserConfigPatchPayload;
+  pendingConfig = mergePatch(pendingConfig, patch);
+  localConfigIntent = mergePatch(localConfigIntent, patch);
+  cachedUserConfig = mergePatch(cachedUserConfig, patch);
+  clearTimeout(configTimer);
+  configTimer = setTimeout(() => {
+    configTimer = undefined;
+    void flushUserConfig().catch(error => console.error('Не удалось сохранить настройки', error));
+  }, 250);
+}
+
+export async function flushUserConfig(): Promise<UserConfigPayload> {
+  for (const flush of draftFlushers) flush();
+  clearTimeout(configTimer); configTimer = undefined;
+  if (configWrite) return configWrite;
+  configWrite = (async () => {
+    while (Object.keys(pendingConfig).length) {
+      const patch = pendingConfig; pendingConfig = {};
+      try {
+        const saved = await request<UserConfigPayload>('/api/config/user', {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch)
+        });
+        cachedUserConfig = mergePatch(saved, localConfigIntent);
+      } catch (error) {
+        // Keep failed changes for a retry; newer edits win over the old batch.
+        pendingConfig = mergePatch(patch, pendingConfig);
+        throw error;
+      }
+    }
+    return cachedUserConfig;
+  })();
+  try { return await configWrite; }
+  finally { configWrite = undefined; }
+}
+
 export function saveUserConfig(config: UserConfigPatchPayload): Promise<UserConfigPayload> {
-  const snapshot = JSON.stringify(config);
-  const operation = configQueue.then(() => request<UserConfigPayload>('/api/config/user', {
-    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: snapshot
-  }));
-  configQueue = operation.catch(() => undefined);
-  return operation;
+  queueUserConfigPatch(config);
+  return flushUserConfig();
 }
 
 export async function autosaveProject(project: PileProject, folderPath?: string | null): Promise<{ saved: boolean; fileName: string; path: string }> {
