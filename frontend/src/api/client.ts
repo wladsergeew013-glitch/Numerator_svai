@@ -214,13 +214,14 @@ export interface UserConfigPayload {
 }
 
 let cachedUserConfig: UserConfigPayload = {};
-let localConfigIntent: UserConfigPatchPayload = {};
+let configRevision = 0;
 export function peekUserConfig(): UserConfigPayload { return cachedUserConfig; }
 
 export async function getUserConfig(): Promise<UserConfigPayload> {
+  const revision = configRevision;
   const config = await request<UserConfigPayload>('/api/config/user');
   // A late GET must not undo changes made while it was in flight.
-  cachedUserConfig = mergePatch(config, localConfigIntent);
+  if (revision === configRevision) cachedUserConfig = applyConfigPatch(applyConfigPatch(config, inFlightConfig), pendingConfig);
   return cachedUserConfig;
 }
 
@@ -229,9 +230,18 @@ export type UserConfigPatchPayload = Omit<UserConfigPayload, 'commandIcons' | 'w
   workspace?: Partial<WorkspaceConfig>;
 };
 let pendingConfig: UserConfigPatchPayload = {};
+let inFlightConfig: UserConfigPatchPayload = {};
 let configTimer: ReturnType<typeof setTimeout> | undefined;
 let configWrite: Promise<UserConfigPayload> | undefined;
 const draftFlushers = new Set<() => void>();
+
+function applyConfigPatch(config: UserConfigPayload, patch: UserConfigPatchPayload): UserConfigPayload {
+  const next = mergePatch(config, patch);
+  if (next.commandIcons) {
+    next.commandIcons = Object.fromEntries(Object.entries(next.commandIcons).filter(([, value]) => value !== null));
+  }
+  return next;
+}
 
 export function registerConfigDraftFlusher(flush: () => void) {
   draftFlushers.add(flush);
@@ -242,8 +252,8 @@ export function queueUserConfigPatch(config: UserConfigPatchPayload) {
   // Snapshot at call time, including nested arrays/objects.
   const patch = JSON.parse(JSON.stringify(config)) as UserConfigPatchPayload;
   pendingConfig = mergePatch(pendingConfig, patch);
-  localConfigIntent = mergePatch(localConfigIntent, patch);
-  cachedUserConfig = mergePatch(cachedUserConfig, patch);
+  configRevision++;
+  cachedUserConfig = applyConfigPatch(cachedUserConfig, patch);
   clearTimeout(configTimer);
   configTimer = setTimeout(() => {
     configTimer = undefined;
@@ -258,15 +268,19 @@ export async function flushUserConfig(): Promise<UserConfigPayload> {
   configWrite = (async () => {
     while (Object.keys(pendingConfig).length) {
       const patch = pendingConfig; pendingConfig = {};
+      inFlightConfig = patch;
       try {
         const saved = await request<UserConfigPayload>('/api/config/user', {
           method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch)
         });
-        cachedUserConfig = mergePatch(saved, localConfigIntent);
+        configRevision++;
+        cachedUserConfig = applyConfigPatch(saved, pendingConfig);
       } catch (error) {
         // Keep failed changes for a retry; newer edits win over the old batch.
         pendingConfig = mergePatch(patch, pendingConfig);
         throw error;
+      } finally {
+        inFlightConfig = {};
       }
     }
     return cachedUserConfig;

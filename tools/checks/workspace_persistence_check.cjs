@@ -43,7 +43,7 @@ if (!process.argv[2]) {
     return mod.exports;
   }
   const { mergePatch } = load('frontend/src/utils/configPatch.ts');
-  let patchCount = 0, active = 0, maxActive = 0, failNext = false, holdNext;
+  let patchCount = 0, active = 0, maxActive = 0, failNext = false, holdNext, holdRead;
   const read = () => fs.existsSync(configFile) ? JSON.parse(fs.readFileSync(configFile, 'utf8')) : {};
   global.fetch = async (url, init = {}) => {
     if (url === '/api/session') return {ok:true, json:async()=>({token:'test-token'})};
@@ -53,8 +53,14 @@ if (!process.argv[2]) {
       try {
         if (holdNext) { const wait = holdNext; holdNext = undefined; await wait; }
         if (failNext) { failNext = false; throw new Error('disk unavailable'); }
-        fs.writeFileSync(configFile, JSON.stringify(mergePatch(read(), JSON.parse(init.body))));
+        const saved = mergePatch(read(), JSON.parse(init.body));
+        if (saved.commandIcons) saved.commandIcons = Object.fromEntries(Object.entries(saved.commandIcons).filter(([, value])=>value!==null));
+        fs.writeFileSync(configFile, JSON.stringify(saved));
       } finally { active--; }
+    }
+    if (holdRead && !init.method) {
+      const snapshot = read(), wait = holdRead; holdRead = undefined; await wait;
+      return {ok:true, json:async()=>snapshot};
     }
     return {ok:true, json:async()=>read()};
   };
@@ -94,6 +100,18 @@ if (!process.argv[2]) {
       client.queueUserConfigPatch({toolbarHeight:220});
       await client.flushUserConfig();
       assert.deepEqual(read().workspace.lists['ribbon-collapsed'], ['file','history']);
+      // A GET started before an edit must not replace the acknowledged value.
+      let finishRead;
+      holdRead = new Promise(resolve=>{finishRead=resolve;});
+      const lateRead = client.getUserConfig(); await tick();
+      await client.saveUserConfig({toolbarHeight:230});
+      finishRead(); assert.equal((await lateRead).toolbarHeight,230);
+      await client.saveUserConfig({commandIcons:{'file.save':'/api/assets/icons/test.png'}});
+      // Backend icon deletion clears bindings without a frontend PATCH.
+      const disk = read(); disk.commandIcons = {}; fs.writeFileSync(configFile, JSON.stringify(disk));
+      assert.deepEqual((await client.getUserConfig()).commandIcons,{},'Acknowledged intent must not hide later backend changes');
+      await client.saveUserConfig({commandIcons:{'file.save':null}});
+      assert.deepEqual(client.peekUserConfig().commandIcons,{},'A removed binding never becomes a null icon URL');
     } else {
       const state = store.getState();
       assert.equal(state.groupManagerVisible, true);
@@ -111,7 +129,7 @@ if (!process.argv[2]) {
       assert.deepEqual(state.workspace.lists['dock-order'], ['editing-panel','group-manager']);
       assert.equal(client.peekUserConfig().panels['workspace-settings'].detached, true);
       assert.equal(client.peekUserConfig().panels['group-manager'].width, 420);
-      assert.equal(client.peekUserConfig().toolbarHeight, 220);
+      assert.equal(client.peekUserConfig().toolbarHeight, 230);
       // Opening the chosen project preserves preferences but clears action refs.
       store.setState({editPointPickMode:'copy_base',copyBasePoint:{x:1,y:2},copyBasePointId:'old'});
       store.getState().openProjectFromFile(createEmptyProject(), 'chosen.pilenum.json');
