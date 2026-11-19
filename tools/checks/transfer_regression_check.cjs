@@ -62,6 +62,41 @@ assert.equal(started.length, grid.length);
 assert.equal(new Set(started.map(p=>p.id)).size, grid.length);
 assert.equal(started[0].id, '1');
 assert.ok(suggestedAxisTolerance(grid) < 10);
+
+// Large rows and columns keep the same point order without passing all points
+// in one call as separate arguments.
+{
+  const axisPoints = Array.from({ length: 100_000 }, (_, i) => point(String(i), 0, -i));
+  const column = buildNumberingOrder(axisPoints, {...axisSettings, method:'columns'});
+  assert.equal(column.length, axisPoints.length);
+  assert.ok(column.every((p, i) => p === axisPoints[i]));
+  const rowPoints = axisPoints.map(p => ({...p, x: -p.y, y: 20}));
+  const row = buildNumberingOrder(rowPoints, {...axisSettings, method:'rows'});
+  assert.equal(row.length, rowPoints.length);
+  assert.ok(row.every((p, i) => p === rowPoints[i]));
+}
+
+// Compare exact tolerances with an all-pairs calculation, including repeated
+// coordinates, near-coincident points and an outlier in the opposite quadrant.
+{
+  const site = (i, x, y) => point(String(i), x, y);
+  const fields = [
+    Array.from({length:80}, (_, i) => site(i, 0, i * 0.5)),
+    Array.from({length:40}, (_, i) => site(i, 0, 0)),
+    Array.from({length:80}, (_, i) => site(i, (i % 7) * 1e-10, (i % 11) * 1e-10)),
+    Array.from({length:100}, (_, i) => site(i, Math.sin(i * 13) * 7, Math.cos(i * 89) * 13)),
+    [...Array.from({length:30}, (_, i) => site(i, 1e12, 0)), site(30, -1e12, -23), site(31, -1e12 - 9, -42)],
+  ];
+  for (const field of fields) {
+    const nearest = field.map(p => {
+      const distances = field.map(q => Math.hypot(p.x - q.x, p.y - q.y));
+      return Math.min(...distances.filter(distance => distance > 1e-9));
+    }).filter(Number.isFinite).sort((a, b) => a - b);
+    const step = nearest[Math.round((nearest.length - 1) / 2)] ?? 1;
+    assert.equal(suggestedAxisTolerance(field), Number((step * 0.35).toPrecision(6)));
+  }
+}
+
 // Global flow is read-only, respects explicit endpoints/order and never crosses pipelines.
 const flowProject = createEmptyProject();
 flowProject.numberingMode = 'per_group';
@@ -444,7 +479,7 @@ async function checkPinnedNumbering() {
   assert.equal(store.getState().project,full.project,'Deduplication happens before capacity validation');
   console.log('PASS R07: exact-limit project reopens, every admission path rejects point 100001 before changing project/history.');
 
-  const {parseCsvRecords,tableWithHeader,guessTableHeader}=load(path.join(root,'frontend/src/utils/tabularImport.ts'));
+  const {parseCsvRecords,tableWithHeader,guessTableHeader,parseImportNumber}=load(path.join(root,'frontend/src/utils/tabularImport.ts'));
   const decimals=parseCsvRecords('\r\n1,25;2,50\r\n3,75;4,10');
   assert.equal(decimals.delimiter,';');assert.deepEqual(decimals.rows,[['1,25','2,50'],['3,75','4,10']]);
   const quoted=parseCsvRecords('\nX;Y;Номер\n"1,25";"2,50";"А;1\nэтаж"\n3,75;4,10;"А""2"');
@@ -453,6 +488,12 @@ async function checkPinnedNumbering() {
   assert.equal(parseCsvRecords('\n\n1.25,2.50\n3.75,4.10').delimiter,',');
   assert.equal(parseCsvRecords('\n1,25\t2,50\n3,75\t4,10').delimiter,'\t');
   assert.deepEqual(parseCsvRecords('1,25;2,50', ',').rows,[['1','25;2','50']]);
+  assert.throws(() => parseCsvRecords('X,Y\n"1"2,3', ','), /после закрывающей кавычки/);
+  assert.throws(() => parseCsvRecords('X,Y\n"1"2,3'));
+  assert.deepEqual(parseCsvRecords('X,Y,Number\r\n"1","2","""7"""').rows[1], ['1','2','"7"']);
+  assert.equal(parseImportNumber('1\u202f234,5'), 1234.5);
+  assert.equal(parseImportNumber('-2\u00a0345,25'), -2345.25);
+  assert.ok(Number.isNaN(parseImportNumber('1\n2')));
   console.log('PASS R11: decimal commas, leading blank records, headers, tabs, quoted values and manual override.');
 
   const cacheProject=createEmptyProject();const cachePid=cacheProject.pipelines[0].id;

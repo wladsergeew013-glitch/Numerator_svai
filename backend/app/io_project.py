@@ -15,6 +15,7 @@ X_ALIASES = {"x", "х", "coordx", "coordinatex", "xcoord", "x_coordinate"}
 Y_ALIASES = {"y", "у", "coordy", "coordinatey", "ycoord", "y_coordinate"}
 N_ALIASES = {"number", "num", "n", "номер", "no", "sourceNumber", "source_number"}
 ID_ALIASES = {"sourceid", "source_id", "id", "guid", "uuid"}
+NUMBER_GROUPING_SPACES = str.maketrans('', '', ' \u00a0\u202f')
 
 
 def _norm(value: str | None) -> str:
@@ -40,7 +41,7 @@ def _read_csv_text(content: bytes) -> str:
 def _parse_float(value: str | None, row_number: int, col_name: str) -> float:
     if value is None:
         raise ValueError(f"Row {row_number}: missing {col_name}")
-    cleaned = value.strip().replace(" ", "").replace(",", ".")
+    cleaned = value.strip().translate(NUMBER_GROUPING_SPACES).replace(",", ".")
     if cleaned == "":
         raise ValueError(f"Row {row_number}: empty {col_name}")
     try:

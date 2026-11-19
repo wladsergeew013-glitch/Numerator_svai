@@ -3,7 +3,7 @@ import { RIBBON_COMMANDS } from '../utils/commandRegistry';
 import { queueProjectSave } from '../utils/projectSaves';
 import { assertProjectJsonSize } from '../utils/projectLimits';
 import { numberingSpace } from '../utils/numberingSpace';
-import { MAX_IMPORT_BYTES, CSV_DELIMITERS, parseCsvRecords, guessTableHeader, tableWithHeader } from '../utils/tabularImport';
+import { MAX_IMPORT_BYTES, CSV_DELIMITERS, parseCsvRecords, guessTableHeader, parseImportNumber, tableWithHeader } from '../utils/tabularImport';
 import { workerTask } from '../utils/workerTask';
 import { CommandIcon } from './CommandIcon';
 import { APP_VERSION } from '../version';
@@ -226,13 +226,6 @@ function safeFileName(value: string, fallback = 'project') {
   return clean || fallback;
 }
 
-function parseImportNumber(value: string) {
-  const clean = value.trim().replace(/\s+/g, '').replace(',', '.');
-  if (!clean) return NaN;
-  const parsed = Number(clean);
-  return Number.isFinite(parsed) ? parsed : NaN;
-}
-
 function guessColumnIndex(columns: string[], patterns: RegExp[], fallback: number) {
   const index = columns.findIndex((column) => patterns.some((pattern) => pattern.test(column.trim())));
   return index >= 0 ? index : Math.min(fallback, Math.max(0, columns.length - 1));
@@ -319,30 +312,33 @@ function groupDisplayName(project: PileProject, groupId: string | null | undefin
   return project.groups.find((group) => group.id === groupId)?.name ?? `Неизвестная группа ${groupId}`;
 }
 
+const MODEL_ISSUE_DETAIL_LIMIT = 18;
+
 function pushIssue(issues: ModelIssue[], level: ModelIssueLevel, title: string, details: string[]) {
   if (details.length === 0) return;
-  issues.push({ level, title, details: details.slice(0, 18) });
+  issues.push({ level, title, details: details.slice(0, MODEL_ISSUE_DETAIL_LIMIT) });
 }
 
 export function buildModelCheck(project: PileProject): ModelCheckResult {
   const issues: ModelIssue[] = [];
-  const groupIds = new Set(project.groups.map((group) => group.id));
   const groupById = new Map(project.groups.map(group => [group.id, group]));
   const pointIndex = new Map(project.points.map((point, index) => [point.id, index]));
-  const pointsWithoutGroup = project.points.filter((point) => !point.groupId).length;
-  const invalidGroupRefPoints = project.points.filter((point) => point.groupId && !groupIds.has(point.groupId));
+  const groupsWithPoints = new Set(project.points.map(point => point.groupId));
+  const pointsWithoutGroup = project.points.filter((point) => !point.groupId);
+  const invalidGroupRefPoints = project.points.filter((point) => point.groupId && !groupById.has(point.groupId));
   const unnumbered = project.points.filter(isPointUnnumbered);
   const manualNumbered = project.points.filter((point) => point.manualNumber);
 
-  pushIssue(issues, 'warning', 'Точки без группы', project.points
-    .map((point, index) => (!point.groupId ? pointDisplayName(point, index) : ''))
-    .filter(Boolean));
+  pushIssue(issues, 'warning', 'Точки без группы', pointsWithoutGroup.slice(0, MODEL_ISSUE_DETAIL_LIMIT)
+    .map((point) => pointDisplayName(point, pointIndex.get(point.id) ?? 0)));
 
-  pushIssue(issues, 'warning', 'Точки без номера', unnumbered.map((point) => pointDisplayName(point, pointIndex.get(point.id) ?? 0)));
+  pushIssue(issues, 'warning', 'Точки без номера', unnumbered.slice(0, MODEL_ISSUE_DETAIL_LIMIT)
+    .map((point) => pointDisplayName(point, pointIndex.get(point.id) ?? 0)));
 
-  pushIssue(issues, 'error', 'Точки с неизвестной группой', invalidGroupRefPoints.map((point) => `${pointDisplayName(point, pointIndex.get(point.id) ?? 0)} · groupId=${point.groupId}`));
+  pushIssue(issues, 'error', 'Точки с неизвестной группой', invalidGroupRefPoints.slice(0, MODEL_ISSUE_DETAIL_LIMIT)
+    .map((point) => `${pointDisplayName(point, pointIndex.get(point.id) ?? 0)} · groupId=${point.groupId}`));
 
-  const emptyGroups = project.groups.filter((group) => !project.points.some((point) => point.groupId === group.id));
+  const emptyGroups = project.groups.filter((group) => !groupsWithPoints.has(group.id));
   pushIssue(issues, 'info', 'Пустые группы', emptyGroups.map((group) => `${group.name} · id ${group.id.slice(-6)}`));
 
   const duplicateGlobalDetails: string[] = [];
@@ -398,7 +394,7 @@ export function buildModelCheck(project: PileProject): ModelCheckResult {
   return {
     totalPoints: project.points.length,
     totalGroups: project.groups.length,
-    pointsWithoutGroup,
+    pointsWithoutGroup: pointsWithoutGroup.length,
     unnumberedPoints: unnumbered.length,
     manualNumberedPoints: manualNumbered.length,
     duplicateNumbersGlobal: duplicateGlobalDetails.length,
@@ -688,7 +684,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const densityPreset = DENSITY_PRESETS[ribbonDensity];
   const currentSectionIds = ribbonMode === 'all' ? ALL_SECTIONS : TAB_SECTIONS[activeTab];
   const allCurrentCollapsed = currentSectionIds.every((id) => collapsedSections.includes(id));
-  const modelCheck = useMemo(() => buildModelCheck(project), [project]);
+  const modelCheck = useMemo(() => modelCheckOpen ? buildModelCheck(project) : null, [modelCheckOpen, project]);
 
 
   const scaledWidthPx = (value: number) => `${Math.round(value * widthScale)}px`;
@@ -1992,7 +1988,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
         </DraggablePanel>
       )}
 
-      {modelCheckOpen && (
+      {modelCheck && (
         <DraggablePanel
           id="model-check-dialog"
           title="Проверка модели"

@@ -122,6 +122,21 @@ const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;
 
   const p=fixture();p.groups[1].visible=false;
   const rect=handler(canvas,'getIdsInRect',{project:p,isPointPickable:pointVisibility(p.groups),rectContains:()=>true,worldToScreen:(x,y)=>({x,y})});assert.deepEqual(rect({}),['a1']);
+  const selectedByRect = [];
+  const assignedByRect = [];
+  const rectangleSelection = {
+    pointer: () => null, panStart: null, vectorPathDrawMode: false, vectorPathEditMode: false,
+    numberingPickMode: null, editPointPickMode: null, manualLinkClearMode: false,
+    getIdsInRect: rect, selectedPointIds: ['b1','a1'], setSelection: ids => selectedByRect.push(ids),
+    pointInfoVisible: false, autoAssignSelection: true, selectedGroupId: 'a',
+    assignPointIdsToGroup: (ids, group) => assignedByRect.push([ids, group]),
+    setSelectionRect() {}, setSelectionStart() {},
+  };
+  for (const mode of ['subtract', 'add']) {
+    handler(canvas, 'onMouseUp', {...rectangleSelection, selectionRect: {mode}})();
+  }
+  assert.deepEqual(selectedByRect, [['b1'], ['b1','a1']]);
+  assert.deepEqual(assignedByRect, [[['a1'], 'a']]);
   p.groups[1].visible=true;p.points[0].x=10;p.points[1].x=1;
   const nearest=handler(canvas,'findNearestPoint',{project:p,isPointPickable:pointVisibility(p.groups),numberingPickMode:'group_start',selectedGroupId:'a',worldToScreen:(x,y)=>({x,y}),distance2:(a,b)=>(a.x-b.x)**2+(a.y-b.y)**2});assert.equal(nearest({x:0,y:0}).id,'a1');
   let added=[],applied=0,selected=[];
@@ -173,7 +188,22 @@ const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;
   console.log('PASS PN-018: mixed selection/copy/manual number keep group and pipeline aligned; explicit group wins over stale pipeline.');
 
   const spaces=load('frontend/src/utils/numberingSpace.ts');
-  const checks=declarations('frontend/src/components/Toolbar.tsx',['isPointUnnumbered','pointDisplayName','groupDisplayName','pushIssue','buildModelCheck'],{numberingSpace:spaces.numberingSpace,numberingRouteIssue:numbering.numberingRouteIssue});
+  const toolbar = 'frontend/src/components/Toolbar.tsx';
+  const detailLimit = handler(toolbar, 'MODEL_ISSUE_DETAIL_LIMIT', {});
+  const checks=declarations(toolbar,['isPointUnnumbered','pointDisplayName','groupDisplayName','pushIssue','buildModelCheck'],{MODEL_ISSUE_DETAIL_LIMIT:detailLimit,numberingSpace:spaces.numberingSpace,numberingRouteIssue:numbering.numberingRouteIssue});
+  const uncheckedProject = fixture();
+  uncheckedProject.points = Array.from({length:25}, (_, i) => point(`sample-${i}`));
+  let modelChecks = 0;
+  const checkModel = { project: uncheckedProject, useMemo: callback => callback(),
+    buildModelCheck: project => { modelChecks++; return checks.buildModelCheck(project); } };
+  assert.equal(handler(toolbar, 'modelCheck', {...checkModel, modelCheckOpen: false}), null);
+  assert.equal(modelChecks, 0);
+  const report = handler(toolbar, 'modelCheck', {...checkModel, modelCheckOpen: true});
+  assert.equal(modelChecks, 1);
+  assert.equal(report.unnumberedPoints, 25);
+  assert.equal(report.pointsWithoutGroup, 25);
+  assert.equal(report.emptyGroups, 2);
+  assert.equal(report.issues.find(issue => issue.title === 'Точки без номера').details.length, detailLimit);
   mixed=fixture();mixed.pipelines.push({id:'P2',name:'second',order:2});mixed.groups[1].pipelineId='P2';mixed.points.forEach(p=>{p.number=1;p.manualNumber=true;});
   assert.equal(checks.buildModelCheck(mixed).duplicateNumbersGlobal,0);assert.equal(checks.buildModelCheck(mixed).duplicateManualNumbers,0);
   mixed.groups[1].pipelineId=mixed.pipelines[0].id;assert.equal(checks.buildModelCheck(mixed).duplicateNumbersGlobal,1);

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import hypot
+from math import hypot, isfinite
 
 from app.schemas import NumberingRowsRequest, NumberingSettings, PileGroup, PilePoint
 from app.numbering_counter import number_route
@@ -28,20 +28,26 @@ def _make_buckets(points: list[PilePoint], axis: str, tolerance: float) -> list[
         return []
     get_value = (lambda p: p.y) if axis == "y" else (lambda p: p.x)
     ordered = sorted(points, key=get_value)
-    buckets: list[list[PilePoint]] = []
-
+    buckets: list[_Bucket] = []
+    current: list[PilePoint] = []
+    total = correction = center = 0.0
     for point in ordered:
-        if not buckets:
-            buckets.append([point])
-            continue
-        current = buckets[-1]
-        center = sum(get_value(p) for p in current) / len(current)
-        if abs(get_value(point) - center) <= tolerance:
-            current.append(point)
+        coordinate = get_value(point)
+        if current and not (abs(coordinate - center) <= tolerance):
+            buckets.append(_Bucket(center, current))
+            current = []
+            total = correction = 0.0
+        current.append(point)
+        # Preserve the compensated sum used by Python 3.12+ at the tolerance boundary.
+        updated = total + coordinate
+        if abs(total) >= abs(coordinate):
+            correction += (total - updated) + coordinate
         else:
-            buckets.append([point])
-
-    return [_Bucket(center=sum(get_value(p) for p in b) / len(b), points=b) for b in buckets]
+            correction += (coordinate - updated) + total
+        total = updated
+        center = (total + correction if isfinite(correction) else total) / len(current)
+    buckets.append(_Bucket(center, current))
+    return buckets
 
 
 def _apply_start_end_preference(route: list[PilePoint], settings: NumberingSettings) -> list[PilePoint]:
@@ -105,8 +111,8 @@ def build_rows_order(points: list[PilePoint], settings: NumberingSettings) -> li
     return _apply_start_end_preference(route, settings)
 
 
-def _next_after_existing_numbers(points: list[PilePoint], group_id: str, start: int, step: int) -> int:
-    values = [p.number for p in points if p.groupId == group_id and p.number is not None]
+def _next_after_existing_numbers(points: list[PilePoint], start: int, step: int) -> int:
+    values = [p.number for p in points if p.number is not None]
     if not values:
         return start
     return max(start, max(values) + step) if step > 0 else min(start, min(values) + step)
@@ -119,14 +125,16 @@ def _pipeline_id(group: PileGroup) -> str:
 def apply_numbering_rows(request: NumberingRowsRequest) -> list[PilePoint]:
     # Compute the whole plan on a copy; a failure never exposes partial numbering.
     points = [p.model_copy(deep=True) for p in request.points]
-    original = {p.id: p for p in request.points}
     groups = sorted(request.groups, key=lambda g: (_pipeline_id(g), g.order))
     by_group = {g.id: g for g in groups}
     target = by_group.get(request.groupId) if request.groupId else None
     if target and target.locked:
         return points
+    members_by_group: dict[str | None, list[PilePoint]] = {}
+    for point in points:
+        members_by_group.setdefault(point.groupId, []).append(point)
     if request.groupId and target is None:
-        selected = [p for p in points if p.groupId == request.groupId]
+        selected = members_by_group.get(request.groupId, [])
         number_route(build_rows_order(selected, request.settings), request.settings)
         return points
     def namespace(point):
@@ -161,10 +169,10 @@ def apply_numbering_rows(request: NumberingRowsRequest) -> list[PilePoint]:
     for group in groups:
         key = _pipeline_id(group)
         current = starts.setdefault(key, group.numbering.startNumber)
-        members = [p for p in points if p.groupId == group.id]
+        members = members_by_group.get(group.id, [])
         if group.locked:
             if request.numberingMode == 'global_sequential' and not group.meta.get('clusterNumbering'):
-                starts[key] = _next_after_existing_numbers(points, group.id, current, group.numbering.step)
+                starts[key] = _next_after_existing_numbers(members, current, group.numbering.step)
             continue
         settings = group.numbering.model_copy(update={'startNumber': current}) if request.numberingMode == 'global_sequential' else group.numbering
         reserve_key = group.id if request.numberingMode == 'per_group' else key
@@ -178,5 +186,6 @@ def apply_numbering_rows(request: NumberingRowsRequest) -> list[PilePoint]:
         number_route(build_rows_order(ungrouped, settings), settings, occupied.setdefault('ungrouped', set()))
     if request.groupId:
         # Prior groups participate only in the simulation of the effective counter.
-        return [p if p.groupId == request.groupId else original[p.id].model_copy(deep=True) for p in points]
+        return [point if point.groupId == request.groupId else original.model_copy(deep=True)
+                for point, original in zip(points, request.points)]
     return points
