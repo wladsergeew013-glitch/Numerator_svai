@@ -161,7 +161,136 @@ function text(node){if(typeof node==='string')return node;if(Array.isArray(node)
   const failed=session.openProjectSafely(async()=>({project:b,fileName:'B.json'}));await tick();
   await click('Сохранить');assert.match(text(render()),/disk full/);
   await click('Отмена');assert.equal(await failed,false);assert.equal(store.getState().project.points[0].x,11);
+
+  const fileName = 'A.pilenum.json';
+  const {queueProjectSave} = load('frontend/src/utils/projectSaves.ts');
+  for (const source of ['local', 'native']) {
+    open(a);
+    store.getState().setPoints([point('A',7)]);
+    let disk = structuredClone(a);
+    const order = [];
+    api.saveLocalProject = async (value, acknowledge) => {
+      order.push('save');
+      disk = structuredClone(value);
+      const result = {saved:true, fileName, name:'A'};
+      acknowledge(result);
+      return result;
+    };
+    let reopen;
+    if (source === 'local') {
+      reopen = handler(toolbar, 'openLocal', {
+        openProjectSafely:session.openProjectSafely, setProjectStatus(){},
+        openLocalProject:async name => {
+          assert.equal(name, fileName);
+          order.push('read');
+          return structuredClone(disk);
+        },
+      });
+    } else {
+      window.pywebview = {api:{
+        selectProjectJson:async () => { order.push('pick'); return {selectionId:'selected-file'}; },
+        saveProjectJson:async (_name, content) => { order.push('save'); disk=JSON.parse(content); return {saved:true}; },
+        readProjectJson:async id => {
+          assert.equal(id, 'selected-file');
+          order.push('read');
+          return {fileName, content:JSON.stringify(disk)};
+        },
+      }};
+      reopen = handler(toolbar, 'openProjectCommand', {
+        openProjectFromPickerSafely:session.openProjectFromPickerSafely,
+        openProjectInputRef:{current:null}, setProjectStatus(){},
+      });
+    }
+    const reopening = reopen(fileName);
+    await tick();
+    assert.match(text(render()), /Сохранить изменения перед сменой проекта/);
+    assert.deepEqual(order, source === 'native' ? ['pick'] : []);
+    await click('Сохранить');
+    await reopening;
+    assert.deepEqual(order, source === 'native' ? ['pick','save','read'] : ['save','read']);
+    assert.equal(disk.points[0].x, 7);
+    assert.equal(store.getState().project.points[0].x, 7);
+    assert.equal(dirty(), false);
+    delete window.pywebview;
+  }
+  console.log('PASS R16: reopening a local or native file reads after Save, retaining X=7 and a clean working project.');
+
+  for (const action of ['open', 'create']) {
+    open(a);
+    store.getState().setPoints([point('A',1)]);
+    const earlier = store.getState().project;
+    const sessionId = store.getState().projectSessionId;
+    const allowWrite = defer();
+    let disk = structuredClone(a);
+    const saving = queueProjectSave(a.project.id, async () => {
+      await allowWrite.promise;
+      disk = structuredClone(earlier);
+      store.getState().completeProjectSave(earlier, sessionId, fileName, 'A');
+    });
+    store.getState().undo();
+    assert.equal(dirty(), false);
+    let loaded = false;
+    api.saveLocalProject = async (value, acknowledge) => {
+      disk = structuredClone(value);
+      const result = {saved:true, fileName, name:'A'};
+      acknowledge(result);
+      return result;
+    };
+    const openOther = handler(toolbar, 'openLocal', {
+      openProjectSafely:session.openProjectSafely, setProjectStatus(){},
+      openLocalProject:async () => { loaded = true; return b; },
+    });
+    const create = handler(toolbar, 'createProjectFromDialog', {
+      createProjectName:'Fresh', runProjectTransition:session.runProjectTransition,
+      createNewProject:name=>store.getState().createNewProject(name),
+      setCreateProjectOpen(){}, setProjectsOpen(){}, setProjectStatus(){},
+    });
+    const transition = action === 'open' ? openOther('B.pilenum.json') : create();
+    await tick();
+    assert.equal(loaded, false);
+    assert.equal(store.getState().project.project.id, a.project.id);
+    assert.equal(render(), null, 'Wait for the pending save before checking dirty state');
+    allowWrite.resolve();
+    await saving;
+    await tick();
+    assert.equal(disk.points[0].x, 1);
+    assert.ok(dirty());
+    assert.match(text(render()), /Сохранить изменения перед сменой проекта/);
+    await click('Сохранить');
+    await transition;
+    assert.equal(disk.points[0].x, 0);
+    assert.equal(store.getState().project.project.name, action === 'open' ? 'B' : 'Fresh');
+  }
+  console.log('PASS R17: Open and New wait for a delayed write and ask to save the undone revision.');
   cleanup.forEach(fn=>fn?.());
+
+  const {makeNormalizedCsvFile, parseImportNumber} = load('frontend/src/utils/tabularImport.ts');
+  for (const x of ['1000', '1_000', '١٠٠٠']) {
+    open(a);
+    const previous = store.getState();
+    let sent, status;
+    const importWithBase = handler(toolbar, 'confirmImportFromFile', {
+      ...session, importPreview:{fileName:'offset.csv', sourceKind:'csv', hasHeader:true,
+        columns:['X','Y','Number'], rows:[[x,'20','P1']]}, importPreviewContext:{current:session.captureProjectContext()},
+      importXColumn:'0', importYColumn:'1', importNumberColumn:'2', importUseBasePoint:true,
+      importBaseX:'10', importBaseY:'5', parseImportNumber, makeNormalizedCsvFile, runFileOperation:async (_, fn)=>fn(),
+      importCsv:async file => { sent = await file.text(); return [point('offset',990)]; },
+      appendImportedPoints:(...args)=>store.getState().appendImportedPoints(...args),
+      setImportStatus:value=>{ status=value; }, setProjectStatus(){}, setImportPreview(){}, setFileImportProgress(){},
+      zoomExtents(){}, canvasWidth:800, canvasHeight:600,
+    });
+    await importWithBase();
+    if (x === '1000') {
+      assert.equal(sent, 'X,Y,Number\n990,15,P1');
+      assert.equal(store.getState().project.points.length, 2);
+    } else {
+      assert.equal(sent, undefined);
+      assert.match(status, /Строка 2, координата X/);
+      assert.equal(store.getState().project, previous.project);
+      assert.equal(store.getState().history, previous.history);
+    }
+  }
+  console.log('PASS R18: both coordinates are validated before the import request and an invalid row leaves state and history intact.');
 
   const client=load('frontend/src/api/client.ts');
   const closeRequested=()=>window.dispatchEvent(new Event('pile-numbering:close-requested'));

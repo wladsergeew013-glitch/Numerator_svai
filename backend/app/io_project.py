@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import math
+import re
 from itertools import chain, islice
 from typing import Iterable
 from uuid import uuid4
@@ -16,6 +17,7 @@ Y_ALIASES = {"y", "у", "coordy", "coordinatey", "ycoord", "y_coordinate"}
 N_ALIASES = {"number", "num", "n", "номер", "no", "sourceNumber", "source_number"}
 ID_ALIASES = {"sourceid", "source_id", "id", "guid", "uuid"}
 NUMBER_GROUPING_SPACES = str.maketrans('', '', ' \u00a0\u202f')
+DECIMAL_COORDINATE = re.compile(r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?')
 
 
 def _norm(value: str | None) -> str:
@@ -44,10 +46,9 @@ def _parse_float(value: str | None, row_number: int, col_name: str) -> float:
     cleaned = value.strip().translate(NUMBER_GROUPING_SPACES).replace(",", ".")
     if cleaned == "":
         raise ValueError(f"Row {row_number}: empty {col_name}")
-    try:
-        result = float(cleaned)
-    except ValueError as exc:
-        raise ValueError(f'Row {row_number}: invalid {col_name}') from exc
+    if not DECIMAL_COORDINATE.fullmatch(cleaned):
+        raise ValueError(f'Row {row_number}: invalid {col_name}')
+    result = float(cleaned)
     if not math.isfinite(result):
         raise ValueError(f'Row {row_number}: {col_name} must be finite')
     return result

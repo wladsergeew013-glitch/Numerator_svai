@@ -2,6 +2,7 @@
 
 import argparse
 from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -13,10 +14,13 @@ import subprocess
 import tempfile
 import time
 from urllib.request import ProxyHandler, build_opener
+from uuid import uuid4
 
 import win32con
+import win32event
 import win32gui
 import win32process
+import win32service
 from websockets.sync.client import connect
 
 
@@ -26,6 +30,7 @@ WINDOW_TITLE = 'Нумератор свайного поля'
 SETTINGS = '[data-panel-id="workspace-settings"]'
 INTERVAL = f'{SETTINGS} input[type="number"][step="0.25"]'
 OPENER = build_opener(ProxyHandler({}))
+TEST_DESKTOP = ContextVar('test_desktop')
 
 
 def wait_for(description, condition, timeout=15):
@@ -112,7 +117,10 @@ def launch(exe, phase):
             f'--remote-debugging-port={port} --remote-debugging-address=127.0.0.1'
         ),
     }
-    process = subprocess.Popen([str(exe)], cwd=exe.parent, env=env, creationflags=subprocess.CREATE_NO_WINDOW)
+    name = f'PileNumberingCheck-{uuid4().hex}'
+    desktop = win32service.CreateDesktop(name, 0, win32con.GENERIC_ALL, None)
+    desktop_token = TEST_DESKTOP.set(desktop)
+    process = None
 
     def logs():
         if not log.exists():
@@ -122,8 +130,8 @@ def launch(exe, phase):
             return source.read().decode('utf-8', errors='replace')
 
     def startup():
-        if process.poll() is not None:
-            raise RuntimeError(f'EXE exited during launch with status {process.returncode}')
+        if win32event.WaitForSingleObject(process, 0) == win32event.WAIT_OBJECT_0:
+            raise RuntimeError(f'EXE exited during launch with status {win32process.GetExitCodeProcess(process)}')
         current = logs()
         if 'Desktop workspace ready' not in current:
             return None
@@ -134,23 +142,42 @@ def launch(exe, phase):
         return None
 
     try:
+        startup_info = win32process.STARTUPINFO()
+        # Windows places the whole test process tree on this desktop without
+        # switching which desktop the user sees.
+        startup_info.lpDesktop = name
+        process, thread, boot_pid, _ = win32process.CreateProcess(
+            str(exe), subprocess.list2cmdline([str(exe)]), None, None, False,
+            subprocess.CREATE_NO_WINDOW | win32con.CREATE_UNICODE_ENVIRONMENT, env, str(exe.parent), startup_info,
+        )
+        thread.Close()
         backend, pid = wait_for('EXE did not finish startup', startup, timeout=90)
         target = wait_for('Could not connect to the isolated WebView2 page', lambda: browser_target(port, backend))
         with connect(target, proxy=None, open_timeout=10, close_timeout=1) as connection:
             yield Page(connection), pid
-        assert process.wait(timeout=30) == 0, process.returncode
+        if win32event.WaitForSingleObject(process, 30000) != win32event.WAIT_OBJECT_0:
+            raise TimeoutError('The test EXE did not close')
+        exit_code = win32process.GetExitCodeProcess(process)
+        assert exit_code == 0, exit_code
         assert 'Application closed' in logs()
     finally:
-        if process.poll() is None:
-            # Restrict cleanup to the bootloader started by this check and its children.
-            subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
-                           capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
-            process.wait(timeout=15)
+        try:
+            if process is not None and win32event.WaitForSingleObject(process, 0) == win32event.WAIT_TIMEOUT:
+                # Restrict cleanup to the bootloader started by this check and its children.
+                subprocess.run(['taskkill', '/PID', str(boot_pid), '/T', '/F'],
+                               capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+                if win32event.WaitForSingleObject(process, 15000) != win32event.WAIT_OBJECT_0:
+                    raise TimeoutError('Could not stop the test EXE')
+        finally:
+            if process is not None:
+                process.Close()
+            TEST_DESKTOP.reset(desktop_token)
+            desktop.CloseDesktop()
 
 
 def windows_of(pid):
     handles = []
-    win32gui.EnumWindows(lambda hwnd, result: result.append(hwnd), handles)
+    win32gui.EnumDesktopWindows(TEST_DESKTOP.get(), lambda hwnd, result: result.append(hwnd), handles)
     return [hwnd for hwnd in handles if win32gui.IsWindowVisible(hwnd)
             and win32process.GetWindowThreadProcessId(hwnd)[1] == pid]
 
@@ -261,6 +288,7 @@ def check(exe, version, folder, result):
         close_window(second_pid)
     result['restart'] = {'projectPicker': True, 'settingsWindowRestored': True, 'groupManagerRestored': True,
                          'unnumberedHighlightRestored': True, 'intervalMinutes': 9, 'returnCode': 0}
+    result['isolatedDesktop'] = True
 
 
 def main():

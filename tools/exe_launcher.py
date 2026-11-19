@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 def _is_frozen() -> bool:
@@ -260,6 +261,8 @@ class DesktopApi:
         self._panels = None
         # Session-only state: the next dialog starts where the user last chose a project.
         self._project_dialog_dir = APP_DIR / "projects"
+        self._project_selection_lock = threading.Lock()
+        self._project_selection: tuple[str, Path | None] | None = None
 
     def frontendReady(self) -> None:  # noqa: N802
         if self._panels is None and self._window is not None and sys.platform.startswith('win'):
@@ -337,7 +340,10 @@ class DesktopApi:
         threading.Thread(target=notify, daemon=True).start()
         return False
 
-    def openProjectJson(self) -> dict[str, Any]:  # noqa: N802 - pywebview JS API name
+    def selectProjectJson(self) -> dict[str, Any]:  # noqa: N802 - pywebview JS API name
+        selection_id = uuid4().hex
+        with self._project_selection_lock:
+            self._project_selection = (selection_id, None)
         try:
             import webview
 
@@ -350,13 +356,29 @@ class DesktopApi:
                 file_types=("Проекты Pile Numbering (*.pilenum.json;*.json)", "JSON (*.json)", "Все файлы (*.*)"),
             )
             if not result:
-                return {"opened": False, "canceled": True}
+                return {"canceled": True}
 
             raw_path = result[0] if isinstance(result, (list, tuple)) else result
             path = Path(str(raw_path)).resolve()
-            self._project_dialog_dir = path.parent
             if not path.is_file() or not path.name.lower().endswith(".json"):
                 raise ValueError("Выберите существующий файл проекта .pilenum.json или .json.")
+            with self._project_selection_lock:
+                if self._project_selection != (selection_id, None):
+                    return {"canceled": True}
+                self._project_selection = (selection_id, path)
+                self._project_dialog_dir = path.parent
+            return {"selectionId": selection_id}
+        except Exception as exc:  # noqa: BLE001 - show a useful error in the frontend
+            logging.exception("Desktop project selection failed")
+            return {"error": str(exc)}
+
+    def readProjectJson(self, selection_id: str) -> dict[str, Any]:  # noqa: N802 - pywebview JS API name
+        with self._project_selection_lock:
+            selection = self._project_selection
+        if selection is None or selection[0] != selection_id or selection[1] is None:
+            return {"opened": False, "error": "Выбор файла устарел. Выберите файл проекта ещё раз."}
+        path = selection[1]
+        try:
             content = path.read_text(encoding="utf-8-sig")
             payload = json.loads(content)
             if not isinstance(payload, dict) or not isinstance(payload.get("project"), dict):
@@ -368,6 +390,12 @@ class DesktopApi:
         except Exception as exc:  # noqa: BLE001 - show a useful error in the frontend
             logging.exception("Desktop project open failed")
             return {"opened": False, "error": str(exc)}
+
+    def openProjectJson(self) -> dict[str, Any]:  # noqa: N802 - legacy bridge entry point
+        result = self.selectProjectJson()
+        if not result.get("selectionId"):
+            return {"opened": False, **result}
+        return self.readProjectJson(result["selectionId"])
 
     def saveProjectJson(self, file_name: str, content: str) -> dict[str, Any]:  # noqa: N802 - pywebview JS API name
         try:

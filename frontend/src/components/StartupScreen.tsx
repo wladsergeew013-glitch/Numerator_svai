@@ -2,16 +2,8 @@ import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'r
 import { listLocalProjects, listRecentProjects, openLocalProject, openLocalProjectLocation, openRecentProject } from '../api/client';
 import { useProjectStore } from '../store/useProjectStore';
 import { APP_VERSION } from '../version';
-import { openProjectSafely, runProjectTransition } from '../utils/projectSession';
+import { openProjectFromPickerSafely, openProjectSafely, runProjectTransition } from '../utils/projectSession';
 import type { LocalProjectInfo, PileProject, RecentProjectInfo } from '../types/project';
-
-interface DesktopProjectBridge {
-  openProjectJson?: () => Promise<{ opened?: boolean; canceled?: boolean; fileName?: string; content?: string; error?: string }>;
-}
-
-function desktopBridge(): DesktopProjectBridge | undefined {
-  return (window as unknown as { pywebview?: { api?: DesktopProjectBridge } }).pywebview?.api;
-}
 
 function displayDate(value?: string | null): string {
   if (!value) return 'Дата неизвестна';
@@ -67,17 +59,10 @@ export function StartupScreen({ onReady }: { onReady: () => void }) {
   };
 
   const openFile = async () => {
-    const bridge = desktopBridge();
-    if (!bridge?.openProjectJson) { fileInput.current?.click(); return; }
     setError('');
     setBusy('file');
     try {
-      const opened = await openProjectSafely(async () => {
-        const result = await bridge.openProjectJson!();
-        if (result.canceled) return null;
-        if (!result.opened || !result.fileName || !result.content) throw new Error(result.error || 'Не удалось открыть файл проекта.');
-        return { project: JSON.parse(result.content) as PileProject, fileName: result.fileName };
-      });
+      const opened = await openProjectFromPickerSafely(() => fileInput.current?.click());
       if (opened) onReady();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось открыть файл проекта.');

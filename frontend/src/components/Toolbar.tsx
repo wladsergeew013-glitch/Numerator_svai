@@ -3,7 +3,7 @@ import { RIBBON_COMMANDS } from '../utils/commandRegistry';
 import { queueProjectSave } from '../utils/projectSaves';
 import { assertProjectJsonSize } from '../utils/projectLimits';
 import { numberingSpace } from '../utils/numberingSpace';
-import { MAX_IMPORT_BYTES, CSV_DELIMITERS, parseCsvRecords, guessTableHeader, parseImportNumber, tableWithHeader } from '../utils/tabularImport';
+import { MAX_IMPORT_BYTES, CSV_DELIMITERS, parseCsvRecords, guessTableHeader, makeNormalizedCsvFile, parseImportNumber, tableWithHeader } from '../utils/tabularImport';
 import { workerTask } from '../utils/workerTask';
 import { CommandIcon } from './CommandIcon';
 import { APP_VERSION } from '../version';
@@ -12,7 +12,7 @@ import { runFileOperation } from '../utils/operationLog';
 import { ChangeEvent, CSSProperties, ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CadOperationCancelled, exportNanoCadBlocks, exportNanoCadModelStudioObjects, getUserConfig, importCsv, importNanoCadBlocks, importNanoCadModelStudioObjects, listLocalProjects, openLocalProject, openLocalProjectLocation, pickNanoCadBlockSample, saveLocalProject, peekUserConfig, queueUserConfigPatch, scanNanoCadBlocks, scanNanoCadModelStudioObjects, type CadProgress, type NanoCadBlockSummary, type NanoCadModelStudioObjectSummary } from '../api/client';
 import { numberingRouteIssue, useProjectStore } from '../store/useProjectStore';
-import { assertProjectContext, captureProjectContext, isProjectSession, openProjectSafely, runProjectTransition, type ProjectContext } from '../utils/projectSession';
+import { assertProjectContext, captureProjectContext, isProjectSession, openProjectFromPickerSafely, openProjectSafely, runProjectTransition, type ProjectContext } from '../utils/projectSession';
 import { LocalProjectInfo, PileGroup, PilePoint, PileProject } from '../types/project';
 import { DraggablePanel } from './DraggablePanel';
 import { WorkspaceSettingsPanel } from './WorkspaceSettingsPanel';
@@ -231,12 +231,6 @@ function guessColumnIndex(columns: string[], patterns: RegExp[], fallback: numbe
   return index >= 0 ? index : Math.min(fallback, Math.max(0, columns.length - 1));
 }
 
-function escapeCsv(value: string) {
-  const text = String(value ?? '');
-  if (/[",\n\r;]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
-  return text;
-}
-
 async function readTextFile(file: File) {
   const buffer = await file.arrayBuffer();
   try {
@@ -267,33 +261,6 @@ async function buildImportPreview(file: File): Promise<CsvPreviewData> {
   const lower = file.name.toLowerCase();
   if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) return buildExcelPreview(file);
   return buildCsvPreview(file);
-}
-
-function makeNormalizedCsvFile(
-  preview: CsvPreviewData,
-  xIndex: number,
-  yIndex: number,
-  numberIndex: number | null,
-  basePoint: { enabled: boolean; x: number; y: number }
-) {
-  const lines = ['X,Y,Number'];
-  for (const row of preview.rows) {
-    const rawX = row[xIndex] ?? '';
-    const rawY = row[yIndex] ?? '';
-    if (!rawX.trim() && !rawY.trim()) continue;
-    let x = rawX;
-    let y = rawY;
-    if (basePoint.enabled) {
-      const parsedX = parseImportNumber(rawX);
-      const parsedY = parseImportNumber(rawY);
-      if (Number.isFinite(parsedX)) x = String(Math.round((parsedX - basePoint.x) * 1000) / 1000);
-      if (Number.isFinite(parsedY)) y = String(Math.round((parsedY - basePoint.y) * 1000) / 1000);
-    }
-    const number = numberIndex === null ? '' : row[numberIndex] ?? '';
-    lines.push([x, y, number].map(escapeCsv).join(','));
-  }
-  const name = preview.fileName.replace(/\.(csv|xlsx|xls)$/i, '') || 'import';
-  return new File([lines.join('\n')], `${name}.normalized.csv`, { type: 'text/csv;charset=utf-8' });
 }
 
 
@@ -543,7 +510,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
       setNanoCadModelScanId(null); setNanoCadBlockScanId(null);
       setNanoCadModelScannedAt(null); setNanoCadBlockScannedAt(null);
       setNanoCadModelScanScope(null); setNanoCadBlockScanScope(null);
-      setScanStatus('Скан устарел после попытки записи в DWG. Перед следующим обменом обновите скан.');
+      setScanStatus('Снимки сканирования устарели. Перед следующим обменом обновите скан.');
     };
     window.addEventListener('pile-numbering:cad-changed', invalidate);
     return () => window.removeEventListener('pile-numbering:cad-changed', invalidate);
@@ -1341,20 +1308,8 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   };
 
   const openProjectCommand = async () => {
-    const desktopApi = (window as unknown as {
-      pywebview?: { api?: { openProjectJson?: () => Promise<{ opened?: boolean; path?: string; fileName?: string; content?: string; canceled?: boolean; error?: string }> } };
-    }).pywebview?.api;
-    if (!desktopApi?.openProjectJson) {
-      openProjectInputRef.current?.click();
-      return;
-    }
     try {
-      if (!await openProjectSafely(async () => {
-        const result = await desktopApi.openProjectJson!();
-        if (result?.canceled) return null;
-        if (!result?.opened || !result.fileName || !result.content) throw new Error(result?.error || 'Не удалось открыть файл проекта.');
-        return { project: JSON.parse(result.content) as PileProject, fileName: result.fileName };
-      })) return;
+      if (!await openProjectFromPickerSafely(() => openProjectInputRef.current?.click())) return;
       setProjectStatus('Проект открыт.');
     } catch (error) {
       setProjectStatus(error instanceof Error ? error.message : 'Не удалось открыть файл проекта.');

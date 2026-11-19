@@ -292,4 +292,53 @@ const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;
     assert.equal(scanInvalidations-before,Number(outcome.scanCachesInvalidated));
   }
   console.log('PASS R13: CAD completion invalidates both scan kinds after success or failed readback, preserving scans on no-write outcomes.');
+
+  for (const kind of ['blocks/export', 'modelstudio/export']) {
+    for (const afterWrite of [false, true]) {
+      const scans = { blockId:'blocks-ready', modelId:'models-ready', blockAt:1, modelAt:1, blockScope:'all', modelScope:'all' };
+      const generation = {current:0};
+      const invalidate = handler(toolbar, 'invalidate', {
+        scanGeneration:generation,
+        setNanoCadBlockScanId:value=>{scans.blockId=value;}, setNanoCadModelScanId:value=>{scans.modelId=value;},
+        setNanoCadBlockScannedAt:value=>{scans.blockAt=value;}, setNanoCadModelScannedAt:value=>{scans.modelAt=value;},
+        setNanoCadBlockScanScope:value=>{scans.blockScope=value;}, setNanoCadModelScanScope:value=>{scans.modelScope=value;},
+        setScanStatus(){},
+      });
+      window.addEventListener('pile-numbering:cad-changed', invalidate);
+      const submitted = defer();
+      let cancelled = false;
+      global.fetch = async (url, init) => {
+        if (url === '/api/nanocad/operations') {
+          assert.equal(JSON.parse(init.body).kind, kind);
+          submitted.resolve();
+          return {ok:true, json:async()=>({id:'cancel-export'})};
+        }
+        if (url === '/api/nanocad/operations/cancel-export/cancel') {
+          cancelled = true;
+          return {ok:true, json:async()=>({status:'running', cancelRequested:true, scanCachesInvalidated:true})};
+        }
+        assert.equal(url, '/api/nanocad/operations/cancel-export');
+        const updated = Number(afterWrite);
+        return {ok:true, json:async()=> cancelled
+          ? {status:'cancelled', error:'Stopped', updated, scanCachesInvalidated:true}
+          : {status:'running', updated}};
+      };
+      try {
+        const exporting = kind === 'blocks/export'
+          ? client.exportNanoCadBlocks({blockName:'Pile', numberAttribute:'NUMBER', points:[]})
+          : client.exportNanoCadModelStudioObjects({numberParameter:'NUMBER', points:[]});
+        const rejected = assert.rejects(exporting, client.CadOperationCancelled);
+        await submitted.promise;
+        await tick();
+        await client.cancelActiveNanoCadOperation();
+        await rejected;
+        assert.ok(cancelled);
+        assert.equal(generation.current, 1);
+        assert.ok(Object.values(scans).every(value=>value === null));
+      } finally {
+        window.removeEventListener('pile-numbering:cad-changed', invalidate);
+      }
+    }
+  }
+  console.log('PASS R13: cancellation before/after a write clears both actual Toolbar scan IDs for both export kinds.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -251,7 +251,7 @@ def status(job_id):
         return snapshot
 
 
-def cancel(job_id):
+def cancel(job_id, *, clear_export_scans=None):
     requested = False
     kind = None
     with _jobs_lock:
@@ -261,6 +261,9 @@ def cancel(job_id):
         if job['status'] == 'running':
             requested = True
             kind = job['kind']
+            if clear_export_scans is not None and kind in ('blocks/export', 'modelstudio/export'):
+                clear_export_scans()
+                job['scanCachesInvalidated'] = True
             job['_cancel'].set()
             job.update(cancelRequested=True, phase='Остановка запрошена…')
             entries = job.setdefault('_logs', [])
@@ -270,6 +273,8 @@ def cancel(job_id):
             entries.append({'timestamp': time.time(), 'elapsedSeconds': round(time.monotonic() - job.get('_started', time.monotonic()), 3),
                             'event': 'cad_cancel_requested', 'level': 'INFO', 'details': '{}'})
         result = {'id': job_id, 'status': job['status'], 'cancelRequested': job.get('cancelRequested', False)}
+        if job.get('scanCachesInvalidated'):
+            result['scanCachesInvalidated'] = True
     if requested and log_event:
         log_event('cad_cancel_requested', extra={'operationId': job_id, 'kind': kind}, level=logging.INFO)
     return result

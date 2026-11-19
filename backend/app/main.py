@@ -1124,9 +1124,13 @@ def _filter_export_points(points: list[NanoCadExportPoint], selected_group_ids: 
     return [p for p in points if p.groupId in allowed]
 
 
-def _invalidate_scan_caches():
+def _clear_scan_caches():
     _MODELSTUDIO_SCAN_CACHE.clear()
     _BLOCK_SCAN_CACHE.clear()
+
+
+def _invalidate_scan_caches():
+    _clear_scan_caches()
     cad.update_counts(scanCachesInvalidated=True)
 
 
@@ -2810,11 +2814,7 @@ def get_cad_operation(operation_id: str):
 
 @app.post('/api/nanocad/operations/{operation_id}/cancel')
 def cancel_cad_operation(operation_id: str):
-    result = cad.cancel(operation_id)
-    if result['cancelRequested'] and cad.status(operation_id)['kind'].endswith('/export'):
-        _BLOCK_SCAN_CACHE.clear()
-        _MODELSTUDIO_SCAN_CACHE.clear()
-    return result
+    return cad.cancel(operation_id, clear_export_scans=_clear_scan_caches)
 
 
 @app.get('/api/nanocad/operations/{operation_id}/logs')

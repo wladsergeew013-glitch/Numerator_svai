@@ -479,6 +479,33 @@ async function checkPinnedNumbering() {
   assert.equal(store.getState().project,full.project,'Deduplication happens before capacity validation');
   console.log('PASS R07: exact-limit project reopens, every admission path rejects point 100001 before changing project/history.');
 
+  {
+    const limits = load(path.join(root, 'frontend/src/utils/projectLimits.ts'));
+    const description = 'A'.repeat(500);
+    const compact = {project:{id:'compact',name:'Compact'}, points:Array.from({length:100_000}, (_, i) =>
+      ({id:`p${i}`, x:i, y:0, meta:{description}}))};
+    store.getState().openProjectFromFile(compact, 'Compact.pilenum.json');
+    const current = store.getState();
+    assert.equal(current.project.points.length, 100_000);
+    assert.deepEqual(current.project.points[0], compact.points[0]);
+    limits.assertProjectCapacity(current.project);
+
+    const nearLimit = createEmptyProject();
+    nearLimit.project.fileName = nearLimit.project.sourceFileName = 'budget.pilenum.json';
+    const originalLimit = limits.MAX_PROJECT_JSON_BYTES;
+    try {
+      limits.MAX_PROJECT_JSON_BYTES = new Blob([JSON.stringify(nearLimit)]).size;
+      limits.assertProjectCapacity(nearLimit);
+      assert.throws(() => store.getState().openProjectFromFile(nearLimit, 'budget.pilenum.json'), /64 МБ/);
+      assert.equal(store.getState().project, current.project);
+      assert.equal(store.getState().projectSessionId, current.projectSessionId);
+      assert.equal(store.getState().history, current.history);
+    } finally {
+      limits.MAX_PROJECT_JSON_BYTES = originalLimit;
+    }
+    console.log('PASS R08: 100,000 sparse points open within the budget; a normalized document over the limit leaves the old session intact.');
+  }
+
   const {parseCsvRecords,tableWithHeader,guessTableHeader,parseImportNumber}=load(path.join(root,'frontend/src/utils/tabularImport.ts'));
   const decimals=parseCsvRecords('\r\n1,25;2,50\r\n3,75;4,10');
   assert.equal(decimals.delimiter,';');assert.deepEqual(decimals.rows,[['1,25','2,50'],['3,75','4,10']]);
