@@ -6,7 +6,7 @@ from typing import Any, Literal
 from uuid import uuid4
 import math
 
-from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 from app.project_limits import MAX_PROJECT_POINTS
 
 SAFE_INTEGER = 2**53 - 1
@@ -257,6 +257,21 @@ class PileProject(BaseModel):
     gridSettings: GridSettings = Field(default_factory=GridSettings)
     viewSettings: ViewSettings = Field(default_factory=ViewSettings)
     operations: list[OperationRecord] = Field(default_factory=list)
+
+    @field_serializer('points', when_used='json')
+    def serialize_project_points(self, points: list[PilePoint]):
+        # Preserve the sparse project document on save and reopen. Standalone
+        # point responses still carry all the fields of the PilePoint API.
+        result = []
+        for point in points:
+            data = point.model_dump(mode='json', exclude_unset=True)
+            data['id'] = point.id
+            for axis in ('x', 'y'):
+                value = data[axis]
+                if isinstance(value, float) and value.is_integer() and abs(value) < 1e21:
+                    data[axis] = int(value)
+            result.append(data)
+        return result
 
     # Обратная совместимость с первым каркасом Codex, где было name на верхнем уровне.
     @property

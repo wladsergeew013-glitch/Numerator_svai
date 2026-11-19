@@ -3245,7 +3245,8 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
                 onMouseDown={e => onPointMouseDown(e, p.id)} onClick={e => onPointClick(e, p.id)}
                 onDblClick={e => onPointDblClick(e, p.id)} onTap={e => onPointClick(e as any, p.id)} />;
             }
-            const syncStroke = p.syncState === 'added' ? '#22c55e' : p.syncState === 'moved' ? '#eab308' : p.syncState === 'deleted' ? '#ef4444' : '#020617';
+            const syncState = p.syncState ?? 'added';
+            const syncStroke = syncState === 'added' ? '#22c55e' : syncState === 'moved' ? '#eab308' : syncState === 'deleted' ? '#ef4444' : '#020617';
             const label = p.number != null ? String(p.number) : '';
             const fontSize = numberFontSize;
             const bubbleWidth = textWidth(label, fontSize) + 10;

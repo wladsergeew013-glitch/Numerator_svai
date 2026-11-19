@@ -54,6 +54,29 @@ class DesktopLifecycleTest(unittest.TestCase):
                 self.assertEqual(calls[2].kwargs['directory'], str(elsewhere))
                 self.assertEqual(launcher.DesktopApi()._project_dialog_dir, projects)
 
+    def test_native_selection_reads_the_file_after_an_atomic_save(self):
+        from app.project_files import save_project_file
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            path = root / 'field.pilenum.json'
+            original = {'project': {'id': 'owner'}, 'points': [{'id': 'p', 'x': 0, 'y': 0}]}
+            path.write_text(json.dumps(original), encoding='utf-8')
+            window = MagicMock()
+            window.create_file_dialog.return_value = (str(path),)
+            webview = SimpleNamespace(FileDialog=SimpleNamespace(OPEN=10))
+            with patch.object(launcher, 'APP_DIR', root), patch.dict(sys.modules, {'webview': webview}):
+                api = launcher.DesktopApi()
+                api._window = window
+                selection = api.selectProjectJson()
+                self.assertIn('selectionId', selection)
+                self.assertFalse(api.readProjectJson(str(path))['opened'])
+                original['points'][0]['x'] = 7
+                save_project_file(path, json.dumps(original))
+                opened = api.readProjectJson(selection['selectionId'])
+                self.assertTrue(opened['opened'])
+                self.assertEqual(json.loads(opened['content'])['points'][0]['x'], 7)
+                window.create_file_dialog.assert_called_once()
+
     def test_json_export_cannot_replace_another_project(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'field.pilenum.json'

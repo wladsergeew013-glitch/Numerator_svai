@@ -99,3 +99,40 @@ export function tableWithHeader(allRows: string[][], hasHeader: boolean) {
   if (rows.length > MAX_IMPORT_ROWS) throw new Error('Превышен предел 100000 строк.');
   return { hasHeader, columns, rows, previewRows: rows.slice(0, 12), allRows };
 }
+
+function escapeCsv(value: string) {
+  if (/[",\n\r;]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
+  return value;
+}
+
+export function makeNormalizedCsvFile(
+  preview: { fileName: string; rows: string[][]; columns: string[]; hasHeader: boolean },
+  xIndex: number,
+  yIndex: number,
+  numberIndex: number | null,
+  basePoint: { enabled: boolean; x: number; y: number }
+): File {
+  const errorFor = (row: number, axis: 'X' | 'Y', column: number) =>
+    new Error(`Строка ${row}, координата ${axis} (${preview.columns[column] ?? axis}): ожидается конечное десятичное число.`);
+  const format = (value: number) => {
+    const scaled = value * 1000;
+    return String(basePoint.enabled && Number.isFinite(scaled) ? Math.round(scaled) / 1000 : value);
+  };
+  const lines = ['X,Y,Number'];
+  for (const [index, row] of preview.rows.entries()) {
+    if (!row.some(value => value.trim())) continue;
+    const rowNumber = index + (preview.hasHeader ? 2 : 1);
+    const parsedX = parseImportNumber(row[xIndex]);
+    const parsedY = parseImportNumber(row[yIndex]);
+    if (!Number.isFinite(parsedX)) throw errorFor(rowNumber, 'X', xIndex);
+    if (!Number.isFinite(parsedY)) throw errorFor(rowNumber, 'Y', yIndex);
+    const x = basePoint.enabled ? parsedX - basePoint.x : parsedX;
+    const y = basePoint.enabled ? parsedY - basePoint.y : parsedY;
+    if (!Number.isFinite(x)) throw errorFor(rowNumber, 'X', xIndex);
+    if (!Number.isFinite(y)) throw errorFor(rowNumber, 'Y', yIndex);
+    const number = numberIndex === null ? '' : row[numberIndex] ?? '';
+    lines.push([format(x), format(y), escapeCsv(number)].join(','));
+  }
+  const name = preview.fileName.replace(/\.(csv|xlsx|xls)$/i, '') || 'import';
+  return new File([lines.join('\n')], `${name}.normalized.csv`, { type: 'text/csv;charset=utf-8' });
+}

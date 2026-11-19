@@ -508,6 +508,42 @@ print(json.dumps({'path':str(module),'sha':hashlib.sha256(module.read_bytes()).h
         self.assertEqual(self.client.post('/api/projects/local/save', json=project).status_code, 422)
         self.assertEqual(PileProject.model_validate_json((self.root/'projects'/saved.json()['fileName']).read_bytes()).points[0].x, 42.5)
 
+    def test_R08_sparse_project_roundtrips_without_expanding_point_defaults(self):
+        from app.project_limits import MAX_PROJECT_JSON_BYTES
+
+        self.root.joinpath('projects').mkdir()
+        path = self.root / 'projects/Compact.pilenum.json'
+        description = 'A' * 500
+        raw = json.dumps({
+            'project': {'id': 'compact', 'name': 'Compact'},
+            'points': [{'id': f'p{i}', 'x': i, 'y': 0, 'meta': {'description': description}} for i in range(100000)],
+        }, separators=(',', ':')).encode()
+        self.assertLess(len(raw), MAX_PROJECT_JSON_BYTES)
+        path.write_bytes(raw)
+
+        opened = self.client.get(f'/api/projects/local/{path.name}')
+        self.assertEqual(opened.status_code, 200, opened.content[:200])
+        reopened_bytes = opened.content
+        self.assertLess(len(reopened_bytes), MAX_PROJECT_JSON_BYTES)
+        project = opened.json()
+        self.assertEqual(project['points'][0], {'id':'p0', 'x':0, 'y':0, 'meta':{'description':description}})
+        project['points'][0]['x'] = 7
+        content = json.dumps(project, ensure_ascii=False, separators=(',', ':')).encode()
+        del raw, opened, reopened_bytes, project
+        headers = {'Content-Type': 'application/json'}
+        saved = self.client.post('/api/projects/local/save', content=content, headers=headers)
+        self.assertEqual(saved.status_code, 200, saved.text[:200])
+        autosaved = self.client.post('/api/autosave/project', content=b'{"project":' + content + b'}', headers=headers)
+        self.assertEqual(autosaved.status_code, 200, autosaved.text[:200])
+        for file in (path, Path(autosaved.json()['path'])):
+            self.assertLessEqual(file.stat().st_size, MAX_PROJECT_JSON_BYTES)
+            saved_point = json.loads(file.read_bytes())['points'][0]
+            self.assertEqual(saved_point, {'id':'p0', 'x':7, 'y':0, 'meta':{'description':description}})
+        reopened = self.client.get(f'/api/projects/local/{path.name}')
+        self.assertEqual(reopened.status_code, 200, reopened.content[:200])
+        restored = reopened.json()['points']
+        self.assertEqual((len(restored), restored[0]['x']), (100000, 7))
+
     def test_R09_stale_token_response_is_readable_from_allowed_dev_origin(self):
         origin = 'http://127.0.0.1:5173'
         stale = self.client.get('/api/config/user', headers={'Origin': origin, 'X-Pile-Token': 'previous-session'})
@@ -576,6 +612,9 @@ print(json.dumps({'path':str(module),'sha':hashlib.sha256(module.read_bytes()).h
         self.assertEqual([(p.x, p.y, p.sourceNumber) for p in points], [(1234.5, -2345.25, '0007')])
         with self.assertRaises(ValueError):
             import_points_from_csv(b'X,Y\n"1"2,3\n')
+        for value in ('1_000', '١٠٠٠'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'Row 2: invalid X'):
+                import_points_from_csv(f'X,Y,Number\n{value},20,P1\n'.encode())
 
     def test_R12_single_group_reuses_previous_virtual_counter_and_reserves_neighbours(self):
         for step in (1, -1):
@@ -618,6 +657,60 @@ print(json.dumps({'path':str(module),'sha':hashlib.sha256(module.read_bytes()).h
                 self.assertEqual((status['result']['updated'], status['result']['failedWrites']), (int(writable), int(not writable)))
                 self.assertFalse(api._MODELSTUDIO_SCAN_CACHE)
                 self.assertFalse(api._BLOCK_SCAN_CACHE)
+
+    def test_R13_cancel_exports_marks_both_scans_before_and_after_first_write(self):
+        for kind in ('blocks/export', 'modelstudio/export'):
+            for after_write in (False, True):
+                with self.subTest(kind=kind, after_write=after_write):
+                    attribute = SimpleNamespace(TagString='NUMBER', TextString='old', Update=lambda: None)
+                    block = SimpleNamespace(Handle='B', ObjectName='AcDbBlockReference', EffectiveName='PileBlock',
+                                            InsertionPoint=(0, 0, 0), GetAttributes=lambda: [attribute], Update=lambda: None)
+                    item = entity('A')
+                    doc = Document([block, item])
+                    paused, resume = threading.Event(), threading.Event()
+                    is_block = kind == 'blocks/export'
+                    function = ('_set_block_attribute' if is_block else '_set_modelstudio_parameter') if after_write else '_live_export_record'
+                    original = getattr(api, function)
+
+                    def pause(*args, **kwargs):
+                        value = original(*args, **kwargs)
+                        paused.set()
+                        if not resume.wait(5):
+                            raise AssertionError('Export fixture did not resume')
+                        return value
+
+                    with patch.object(api, '_connect_nanocad', return_value=(None, doc, doc.ModelSpace)):
+                        blocks = api.scan_nanocad_blocks('all')['scanId']
+                        models = api.scan_modelstudio_objects('all')['scanId']
+                        payload = {'scope':'all', 'points':[point('p',0)]}
+                        if is_block:
+                            payload.update(scanId=blocks, blockName='PileBlock', numberAttribute='NUMBER')
+                        else:
+                            payload.update(scanId=models, numberParameter='NUMBER', matchMode='coordinates')
+                        with patch.object(api, function, side_effect=pause):
+                            try:
+                                created = self.client.post('/api/nanocad/operations', json={'kind':kind, 'payload':payload})
+                                self.assertEqual(created.status_code, 200, created.text)
+                                self.assertTrue(paused.wait(5))
+                                operation = created.json()['id']
+                                if not after_write:
+                                    self.assertIn(blocks, api._BLOCK_SCAN_CACHE)
+                                    self.assertIn(models, api._MODELSTUDIO_SCAN_CACHE)
+                                canceled = self.client.post(f'/api/nanocad/operations/{operation}/cancel')
+                                self.assertEqual(canceled.status_code, 200, canceled.text)
+                                self.assertTrue(canceled.json()['scanCachesInvalidated'])
+                                self.assertTrue(cad.status(operation)['scanCachesInvalidated'])
+                                self.assertFalse(api._BLOCK_SCAN_CACHE)
+                                self.assertFalse(api._MODELSTUDIO_SCAN_CACHE)
+                            finally:
+                                resume.set()
+                                self.assertTrue(cad._lock.acquire(timeout=5))
+                                cad._lock.release()
+                        status = self.client.get(f'/api/nanocad/operations/{operation}').json()
+                        self.assertEqual(status['status'], 'cancelled')
+                        self.assertTrue(status['scanCachesInvalidated'])
+                        value = attribute.TextString if is_block else item.Element.Parameters.Item('NUMBER').Value
+                        self.assertEqual(value, '7' if after_write else 'old')
 
     def test_R14_file_component_budget_includes_utf8_and_autosave_suffix(self):
         for index, name in enumerate(('a'*240, 'С'*130, '\U0001f9f1'*100)):

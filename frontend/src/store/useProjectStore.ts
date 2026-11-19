@@ -1880,6 +1880,36 @@ function projectSessionState(project: PileProject, state: ProjectState) {
   };
 }
 
+function withRecordedOperation(project: PileProject, operation: OperationRecord): PileProject {
+  return {
+    ...project,
+    operations: [...project.operations, operation].slice(-300),
+    project: { ...project.project, updatedAt: new Date().toISOString() }
+  };
+}
+
+function openedProjectSession(project: PileProject, state: ProjectState) {
+  const operation = makeOperation('project_opened', {
+    name: project.project.name, points: project.points.length, groups: project.groups.length,
+    fileName: project.project.fileName ?? null
+  });
+  const opened = withRecordedOperation(project, operation);
+  assertProjectCapacity(opened);
+  const session = projectSessionState(opened, state);
+  return {
+    ...session,
+    savedProjectSignature: projectSaveSignature(opened),
+    journalSnapshots: {
+      [operation.id]: {
+        project: structuredClone(opened),
+        selectedPointIds: [],
+        selectedGroupId: session.selectedGroupId,
+        selectedPipelineId: session.selectedPipelineId
+      }
+    }
+  };
+}
+
 export const useProjectStore = create<ProjectState>((set, get) => ({
   project: startupProject,
   projectSessionId: crypto.randomUUID(),
@@ -1971,11 +2001,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   recordOperation: (type, payload = {}) => {
     const op = makeOperation(type, payload);
     set((state) => {
-      const updatedProject: PileProject = {
-        ...state.project,
-        operations: [...state.project.operations, op].slice(-300),
-        project: { ...state.project.project, updatedAt: new Date().toISOString() }
-      };
+      const updatedProject = withRecordedOperation(state.project, op);
       return {
         project: updatedProject,
         journalSnapshots: Object.fromEntries(Object.entries({
@@ -2021,8 +2047,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setProject: (project) => {
     const normalized = normalizeProject(project, get().project);
-    set({ ...projectSessionState(normalized, get()), savedProjectSignature: projectSaveSignature(normalized) });
-    get().recordOperation('project_opened', { name: normalized.project.name, points: normalized.points.length, groups: normalized.groups.length, fileName: normalized.project.fileName ?? null });
+    set(openedProjectSession(normalized, get()));
   },
 
   openProjectFromFile: (project, fileName) => {
@@ -2035,10 +2060,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         name: project.project.name && project.project.name !== 'Untitled project' ? project.project.name : fileBaseName(fileName)
       }
     }, get().project);
-    set({ ...projectSessionState(normalized, get()), savedProjectSignature: projectSaveSignature(normalized) });
-    get().recordOperation('project_opened', { name: normalized.project.name, points: normalized.points.length, groups: normalized.groups.length, fileName });
-    get().markProjectSaved();
-    set({ allGroupsOrderVisible: false });
+    set(openedProjectSession(normalized, get()));
   },
 
   startNewProjectFromImport: (fileName, points) => {
@@ -2475,7 +2497,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         ...state.project,
         points: state.project.points.map((p) => (
           idsSet.has(p.id)
-            ? { ...p, x: p.x + dx, y: p.y + dy, syncState: p.syncState === 'added' ? 'added' : 'moved' }
+            ? { ...p, x: p.x + dx, y: p.y + dy, syncState: (p.syncState ?? 'added') === 'added' ? 'added' : 'moved' }
             : p
         )),
         project: { ...state.project.project, updatedAt: new Date().toISOString() }
