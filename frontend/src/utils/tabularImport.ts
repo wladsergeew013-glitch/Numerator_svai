@@ -6,37 +6,59 @@ export const MAX_IMPORT_COLUMNS = 256;
 export const CSV_DELIMITERS = [';', ',', '\t'] as const;
 
 function readCsvRecords(text: string, delimiter: string, sampleSize = Infinity): string[][] {
-  const rows: string[][] = []; let row: string[] = [], cell = '', quoted = false;
-  const endCell = () => { row.push(cell); cell = ''; if (row.length > MAX_IMPORT_COLUMNS) throw new Error('Слишком много колонок.'); };
-  const endRow = () => { endCell(); if (row.some(c => c.trim())) rows.push(row); row = []; if (rows.length > MAX_IMPORT_ROWS + 1) throw new Error('Превышен предел 100000 строк.'); };
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoteState: 'unquoted' | 'quoted' | 'closed' = 'unquoted';
+  const endCell = () => {
+    row.push(cell);
+    cell = '';
+    quoteState = 'unquoted';
+    if (row.length > MAX_IMPORT_COLUMNS) throw new Error('Слишком много колонок.');
+  };
+  const endRow = () => {
+    endCell();
+    if (row.some(c => c.trim())) rows.push(row);
+    row = [];
+    if (rows.length > MAX_IMPORT_ROWS + 1) throw new Error('Превышен предел 100000 строк.');
+  };
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
-    if (c === '"') {
-      if (quoted && text[i + 1] === '"') { cell += '"'; i++; }
-      else if (quoted || cell === '') quoted = !quoted;
-      else throw new Error('CSV: кавычки внутри неэкранированного поля.');
-    } else if (!quoted && c === delimiter) endCell();
-    else if (!quoted && (c === '\r' || c === '\n')) {
+    if (quoteState === 'quoted') {
+      if (c !== '"') cell += c;
+      else if (text[i + 1] === '"') { cell += '"'; i++; }
+      else quoteState = 'closed';
+    } else if (c === delimiter) {
+      endCell();
+    } else if (c === '\r' || c === '\n') {
       if (c === '\r' && text[i + 1] === '\n') i++;
       endRow();
       if (rows.length >= sampleSize) return rows;
-    }
-    else cell += c;
+    } else if (quoteState === 'closed') {
+      throw new Error('CSV: после закрывающей кавычки ожидается разделитель или конец строки.');
+    } else if (c === '"') {
+      if (cell) throw new Error('CSV: кавычки внутри неэкранированного поля.');
+      quoteState = 'quoted';
+    } else cell += c;
     if (cell.length > 262144) throw new Error('CSV: слишком длинное поле.');
   }
-  if (quoted) throw new Error('CSV: незакрытые кавычки.');
-  if (cell || row.length) endRow();
+  if (quoteState === 'quoted') throw new Error('CSV: незакрытые кавычки.');
+  if (cell || row.length || quoteState === 'closed') endRow();
   return rows;
+}
+
+export function parseImportNumber(value = '') {
+  const text = value.trim().replace(/[ \u00a0\u202f]/g, '').replace(',', '.');
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) return NaN;
+  const number = Number(text);
+  return Number.isFinite(number) ? number : NaN;
 }
 
 function csvDelimiterScore(rows: string[][]): number {
   if (!rows.length || rows[0].length < 2) return -1;
   const hasHeader = guessTableHeader(rows);
-  const isNumber = (value?: string) => {
-    const text = value?.trim().replace(/[ \u00a0\u202f]/g, '').replace(',', '.') ?? '';
-    return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text) && Number.isFinite(Number(text));
-  };
-  const numeric = rows.slice(hasHeader ? 1 : 0).filter(row => isNumber(row[0]) && isNumber(row[1])).length;
+  const numeric = rows.slice(hasHeader ? 1 : 0).filter(row =>
+    Number.isFinite(parseImportNumber(row[0])) && Number.isFinite(parseImportNumber(row[1]))).length;
   const consistent = rows.filter(row => row.length === rows[0].length).length;
   return (hasHeader ? 1000 : 0) + numeric * 20 + consistent;
 }

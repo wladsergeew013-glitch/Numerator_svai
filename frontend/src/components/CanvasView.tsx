@@ -1597,10 +1597,13 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     return { point, screen: worldToScreen(point.x, point.y), kind: previous && forceOrtho ? 'ortho' : 'free' };
   };
 
-  const getIdsInRect = (rect: SelectionRectState) => project.points
-    .filter(isPointPickable)
-    .filter((p) => rectContains(rect, worldToScreen(p.x, p.y)))
-    .map((p) => p.id);
+  const getIdsInRect = (rect: SelectionRectState) => {
+    const ids: string[] = [];
+    for (const point of project.points) {
+      if (isPointPickable(point) && rectContains(rect, worldToScreen(point.x, point.y))) ids.push(point.id);
+    }
+    return ids;
+  };
 
   const groupById = useMemo(() => new Map(project.groups.map(g => [g.id, g])), [project.groups]);
   const pointById = useMemo(() => new Map(project.points.map(p => [p.id, p])), [project.points]);
@@ -2237,7 +2240,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     }
 
     if (!selectionRect) return;
-    const { x, y, w, h, mode } = selectionRect;
+    const { mode } = selectionRect;
 
     if (manualLinkClearMode) {
       const hitKeys = previewSegments
@@ -2259,22 +2262,15 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
       return;
     }
 
-    const ids = project.points
-      .filter(isPointPickable)
-      .filter((p) => {
-        const sp = worldToScreen(p.x, p.y);
-        return sp.x >= x && sp.x <= x + w && sp.y >= y && sp.y <= y + h;
-      })
-      .map((p) => p.id);
-
-    const nextSelection = mode === 'add'
-      ? Array.from(new Set([...selectedPointIds, ...ids]))
-      : selectedPointIds.filter((id) => !ids.includes(id));
-
-    setSelection(nextSelection);
-
-    if (!pointInfoVisible && mode === 'add' && autoAssignSelection && selectedGroupId && ids.length > 0) {
-      assignPointIdsToGroup(ids, selectedGroupId);
+    const ids = getIdsInRect(selectionRect);
+    if (mode === 'subtract') {
+      const removed = new Set(ids);
+      setSelection(selectedPointIds.filter((id) => !removed.has(id)));
+    } else {
+      setSelection(Array.from(new Set([...selectedPointIds, ...ids])));
+      if (!pointInfoVisible && autoAssignSelection && selectedGroupId && ids.length > 0) {
+        assignPointIdsToGroup(ids, selectedGroupId);
+      }
     }
 
     setSelectionRect(null);

@@ -549,16 +549,8 @@ function percentileNumber(values: number[], q: number) {
 
 function estimateNearestStepForAuto(points: PilePoint[]) {
   if (points.length < 2) return 1000;
-  const nearest: number[] = [];
-  for (let i = 0; i < points.length; i += 1) {
-    let best = Number.POSITIVE_INFINITY;
-    for (let j = 0; j < points.length; j += 1) {
-      if (i === j) continue;
-      const d = pointDistance(points[i], points[j]);
-      if (d > 1e-9 && d < best) best = d;
-    }
-    if (Number.isFinite(best)) nearest.push(best);
-  }
+  const search = buildPointSearchTree([...points]);
+  const nearest = points.map(point => nearestDistinctDistance(search, point, Infinity));
   return Math.max(1e-9, percentileNumber(nearest, 0.5) || 1);
 }
 
@@ -570,14 +562,58 @@ interface AutoBounds {
 }
 
 function autoBounds(points: PilePoint[]): AutoBounds {
-  const xs = points.map((point) => point.x);
-  const ys = points.map((point) => point.y);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const { x, y } of points) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+type PointSearchTree = AutoBounds & (
+  { points: PilePoint[] } |
+  { axis: 'x' | 'y'; split: number; left: PointSearchTree; right: PointSearchTree }
+);
+
+function buildPointSearchTree(points: PilePoint[]): PointSearchTree {
+  const bounds = autoBounds(points);
+  const width = bounds.maxX - bounds.minX;
+  const height = bounds.maxY - bounds.minY;
+  if (width === 0 && height === 0) return { ...bounds, points: points.slice(0, 1) };
+  if (points.length <= 16) return { ...bounds, points };
+  const axis = width >= height ? 'x' : 'y';
+  points.sort((a, b) => a[axis] - b[axis]);
+  const middle = Math.floor(points.length / 2);
   return {
-    minX: Math.min(...xs),
-    maxX: Math.max(...xs),
-    minY: Math.min(...ys),
-    maxY: Math.max(...ys)
+    ...bounds, axis, split: points[middle][axis],
+    left: buildPointSearchTree(points.slice(0, middle)),
+    right: buildPointSearchTree(points.slice(middle))
   };
+}
+
+function nearestDistinctDistance(tree: PointSearchTree, point: PilePoint, best: number): number {
+  const { minX, minY, maxX, maxY } = tree;
+  const { x, y } = point;
+  const nearestAxisDistance = Math.max(minX - x, x - maxX, minY - y, y - maxY);
+  if (nearestAxisDistance >= best) return best;
+
+  const minimumDistance = 1e-9;
+  // Skip branches that contain only coincident or almost coincident neighbours.
+  const farthestBound = Math.max(x - minX, maxX - x) + Math.max(y - minY, maxY - y);
+  if (farthestBound <= minimumDistance) return best;
+  if ('points' in tree) {
+    for (const candidate of tree.points) {
+      const distance = pointDistance(point, candidate);
+      if (distance > minimumDistance && distance < best) best = distance;
+    }
+    return best;
+  }
+
+  const nearer = point[tree.axis] < tree.split ? tree.left : tree.right;
+  const farther = nearer === tree.left ? tree.right : tree.left;
+  return nearestDistinctDistance(farther, point, nearestDistinctDistance(nearer, point, best));
 }
 
 function autoCenter(points: PilePoint[]) {
@@ -601,8 +637,8 @@ function splitAutoAxisGaps(points: PilePoint[], axis: 'x' | 'y', maxGap: number)
 function denseHorizontalBands(points: PilePoint[], nearestStep: number) {
   const tolerance = nearestStep * 0.65;
   const minDenseCount = Math.max(6, Math.floor(Math.sqrt(points.length) * 1.25));
-  const raw = autoAxisBuckets(points, 'y', tolerance)
-    .flatMap((bucket) => splitAutoAxisGaps(bucket, 'x', nearestStep * 5.5))
+  const raw = makeAxisBuckets(points, 'y', tolerance)
+    .flatMap((bucket) => splitAutoAxisGaps(bucket.points, 'x', nearestStep * 5.5))
     .map((bucket) => ({ points: bucket, bounds: autoBounds(bucket), center: autoCenter(bucket) }))
     .filter((band) => (
       band.points.length >= minDenseCount &&
@@ -699,8 +735,8 @@ function mergeClustersByHorizontalBands(clusters: PilePoint[][], allPoints: Pile
 
 function verticalTailBands(points: PilePoint[], nearestStep: number) {
   const tolerance = nearestStep * 0.65;
-  const columnBuckets = autoAxisBuckets(points, 'x', tolerance)
-    .flatMap((bucket) => splitAutoAxisGaps(bucket, 'y', nearestStep * 5.5))
+  const columnBuckets = makeAxisBuckets(points, 'x', tolerance)
+    .flatMap((bucket) => splitAutoAxisGaps(bucket.points, 'y', nearestStep * 5.5))
     .map((bucket) => ({ points: bucket, bounds: autoBounds(bucket), center: autoCenter(bucket) }))
     .filter((band) => (
       band.points.length >= 6 &&
@@ -781,9 +817,8 @@ export function connectedAutoClusters(points: PilePoint[], distanceFactor = 1) {
   points = [...points].sort((a, b) => (a.x - b.x) || (a.y - b.y) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   const nearestStep = estimateNearestStepForAuto(points);
-  const xs = points.map((point) => point.x);
-  const ys = points.map((point) => point.y);
-  const span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys), nearestStep);
+  const { minX, maxX, minY, maxY } = autoBounds(points);
+  const span = Math.max(maxX - minX, maxY - minY, nearestStep);
   const secondSteps = points.map((p) => points.filter((q) => q.id !== p.id)
     .map((q) => pointDistance(p, q)).filter((d) => d > 1e-9).sort((a, b) => a - b))
     .map((distances) => distances[Math.min(1, distances.length - 1)] ?? nearestStep);
@@ -870,20 +905,22 @@ function orderClustersByRoute(clusters: PilePoint[][]) {
   return route.map((item) => item.points);
 }
 
-function autoAxisBuckets(points: PilePoint[], axis: 'x' | 'y', tolerance: number) {
-  const sorted = [...points].sort((a, b) => (axis === 'x' ? a.x - b.x : a.y - b.y));
-  const buckets: PilePoint[][] = [];
-  const getValue = (point: PilePoint) => (axis === 'x' ? point.x : point.y);
+function makeAxisBuckets(points: PilePoint[], axis: 'x' | 'y', tolerance: number) {
+  const ordered = [...points].sort((a, b) => a[axis] - b[axis]);
+  const buckets: Array<{ center: number; points: PilePoint[] }> = [];
+  let current: (typeof buckets)[number] | undefined;
+  let sum = 0;
 
-  for (const point of sorted) {
-    const current = buckets[buckets.length - 1];
-    if (!current) {
-      buckets.push([point]);
-      continue;
+  for (const point of ordered) {
+    const coordinate = point[axis];
+    if (!current || !(Math.abs(coordinate - current.center) <= tolerance)) {
+      current = { center: 0, points: [] };
+      buckets.push(current);
+      sum = 0;
     }
-    const center = current.reduce((sum, item) => sum + getValue(item), 0) / current.length;
-    if (Math.abs(getValue(point) - center) <= tolerance) current.push(point);
-    else buckets.push([point]);
+    current.points.push(point);
+    sum += coordinate;
+    current.center = sum / current.points.length;
   }
 
   return buckets;
@@ -891,9 +928,9 @@ function autoAxisBuckets(points: PilePoint[], axis: 'x' | 'y', tolerance: number
 
 function scoreAxisMethod(points: PilePoint[], axis: 'x' | 'y', tolerance: number) {
   if (points.length < 3) return 0;
-  const buckets = autoAxisBuckets(points, axis, tolerance).filter((bucket) => bucket.length > 0);
-  const multiBuckets = buckets.filter((bucket) => bucket.length >= 2);
-  const covered = multiBuckets.reduce((sum, bucket) => sum + bucket.length, 0);
+  const buckets = makeAxisBuckets(points, axis, tolerance);
+  const multiBuckets = buckets.filter((bucket) => bucket.points.length >= 2);
+  const covered = multiBuckets.reduce((sum, bucket) => sum + bucket.points.length, 0);
   const avg = multiBuckets.length ? covered / multiBuckets.length : 0;
   const coverage = covered / points.length;
   const balancePenalty = buckets.length > 1 ? 1 : 0.55;
@@ -919,30 +956,6 @@ function chooseAutoNumberingForCluster(points: PilePoint[], order: number, pipel
     direction: method === 'columns' ? 'snake_columns_top_left' : points.length >= 8 ? 'snake_rows_left_top' : 'left_to_right_top_to_bottom',
     optimize: true
   };
-}
-
-function makeBucketsForNumbering(points: PilePoint[], axis: 'x' | 'y', tolerance: number) {
-  if (!points.length) return [] as { center: number; points: PilePoint[] }[];
-  const safeTolerance = Math.max(1e-9, Number.isFinite(tolerance) ? tolerance : 250);
-  const ordered = [...points].sort((a, b) => (axis === 'x' ? a.x - b.x : a.y - b.y));
-  const buckets: PilePoint[][] = [];
-  const getValue = (p: PilePoint) => (axis === 'x' ? p.x : p.y);
-
-  for (const point of ordered) {
-    const current = buckets[buckets.length - 1];
-    if (!current) {
-      buckets.push([point]);
-      continue;
-    }
-    const center = current.reduce((sum, p) => sum + getValue(p), 0) / current.length;
-    if (Math.abs(getValue(point) - center) <= safeTolerance) current.push(point);
-    else buckets.push([point]);
-  }
-
-  return buckets.map((points) => ({
-    points,
-    center: points.reduce((sum, p) => sum + getValue(p), 0) / Math.max(1, points.length)
-  }));
 }
 
 function applyStartEndPreference(route: PilePoint[], settings: NumberingSettings) {
@@ -1057,8 +1070,10 @@ function rotateBucketsFromStart<T extends { points: PilePoint[] }>(buckets: T[],
 }
 
 function buildRowsColumnsOrder(points: PilePoint[], settings: NumberingSettings, method: 'rows' | 'columns') {
+  const tolerance = method === 'columns' ? settings.columnTolerance : settings.rowTolerance;
+  const safeTolerance = Math.max(1e-9, Number.isFinite(tolerance) ? tolerance : 250);
   if (method === 'columns') {
-    const buckets = makeBucketsForNumbering(points, 'x', settings.columnTolerance);
+    const buckets = makeAxisBuckets(points, 'x', safeTolerance);
     const direction = settings.direction;
     const leftToRight = !direction.includes('right_to_left');
     const topToBottom = !direction.includes('bottom_to_top') && direction !== 'snake_columns_bottom_left';
@@ -1070,12 +1085,13 @@ function buildRowsColumnsOrder(points: PilePoint[], settings: NumberingSettings,
       let reverse = !topToBottom;
       if (snake && originalIndex % 2 === 1) reverse = !reverse;
       const ordered = [...bucket.points].sort((a, b) => reverse ? a.y - b.y : b.y - a.y);
-      route.push(...(containsStart ? rotatePointOrderFromStart(ordered, settings.startPointId) : ordered));
+      const segment = containsStart ? rotatePointOrderFromStart(ordered, settings.startPointId) : ordered;
+      for (const point of segment) route.push(point);
     });
     return route;
   }
 
-  const buckets = makeBucketsForNumbering(points, 'y', settings.rowTolerance);
+  const buckets = makeAxisBuckets(points, 'y', safeTolerance);
   const direction = settings.direction;
   const topToBottom = !direction.includes('bottom_to_top') && !direction.endsWith('bottom_left');
   const leftToRight = !direction.includes('right_to_left') && direction !== 'snake_rows_right_top';
@@ -1087,7 +1103,8 @@ function buildRowsColumnsOrder(points: PilePoint[], settings: NumberingSettings,
     let reverse = !leftToRight;
     if (snake && originalIndex % 2 === 1) reverse = !reverse;
     const ordered = [...bucket.points].sort((a, b) => reverse ? b.x - a.x : a.x - b.x);
-    route.push(...(containsStart ? rotatePointOrderFromStart(ordered, settings.startPointId) : ordered));
+    const segment = containsStart ? rotatePointOrderFromStart(ordered, settings.startPointId) : ordered;
+    for (const point of segment) route.push(point);
   });
 
   return route;
@@ -3109,12 +3126,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   createGroup: () => {
     get().pushHistory();
-    const project = get().project;
-    const pipelineId = get().selectedPipelineId ?? defaultPipelineId(project);
+    const { project, selectedPipelineId, selectedPointIds } = get();
+    const pipelineId = selectedPipelineId ?? defaultPipelineId(project);
     const currentGroups = project.groups;
     const orderInPipeline = sortedGroupsForPipeline(project, pipelineId).length + 1;
     const group = makeGroup(orderInPipeline, currentGroups, pipelineId);
-    const selected = project.points.filter((p) => get().selectedPointIds.includes(p.id));
+    const selectedIds = new Set(selectedPointIds);
+    const selected = project.points.filter((point) => selectedIds.has(point.id));
     const tolerance = suggestedAxisTolerance(selected.length > 1 ? selected : project.points);
     group.numbering = { ...group.numbering, rowTolerance: tolerance, columnTolerance: tolerance };
     set((state) => ({

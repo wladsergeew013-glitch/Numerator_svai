@@ -570,6 +570,13 @@ print(json.dumps({'path':str(module),'sha':hashlib.sha256(module.read_bytes()).h
                 if 'Номер' in data:
                     self.assertEqual(points[0].sourceNumber, 'А;1\nэтаж')
 
+    def test_csv_coordinate_thousands_spaces_and_quoted_coordinates(self):
+        csv_text = 'X,Y,Number\n"1\u202f234,5","-2\u00a0345,25",0007\n'
+        points = import_points_from_csv(csv_text.encode()).points
+        self.assertEqual([(p.x, p.y, p.sourceNumber) for p in points], [(1234.5, -2345.25, '0007')])
+        with self.assertRaises(ValueError):
+            import_points_from_csv(b'X,Y\n"1"2,3\n')
+
     def test_R12_single_group_reuses_previous_virtual_counter_and_reserves_neighbours(self):
         for step in (1, -1):
             with self.subTest(step=step):
