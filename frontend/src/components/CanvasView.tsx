@@ -6,7 +6,7 @@ import { workspaceKeyboardBlocked } from '../utils/workspaceKeyboard';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Arrow, Circle, Group, Layer, Line, Rect, Stage, Text } from 'react-konva';
 import { KonvaEventObject } from 'konva/lib/Node';
-import { buildPreviewOrderForGroup, buildGroupFlow, buildNumberingOrder, isManualLinkTargetAllowed, useProjectStore } from '../store/useProjectStore';
+import { buildPreviewOrderForGroup, buildGroupFlow, isManualLinkTargetAllowed, useProjectStore } from '../store/useProjectStore';
 
 interface Props {
   width: number;
@@ -1766,7 +1766,6 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
     const nextPath = isStart
       ? compactCanvasWorldPath([...extension.slice().reverse(), ...sourcePath], 1)
       : compactCanvasWorldPath([...sourcePath, ...extension], 1);
-    pushHistory();
     updateGroupNumbering(group.id, { method: 'vector', vectorPath: nextPath });
     recordOperation('group_vector_path_extended', { groupId: group.id, groupName: group.name, side: isStart ? 'start' : 'end', points: extension.length });
     setVectorExtendState(null);
@@ -1842,8 +1841,8 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
 
   const numberedFallbackAutoPoints = useMemo(() => {
     if (!activeNumberingGroup) return [];
-    if (!activeGroupPoints.some((p) => p.number != null && Number.isFinite(p.number))) {
-      return buildNumberingOrder(activeGroupPoints, activeNumberingGroup.numbering);
+    if (activeNumberingGroup.numbering.manualLinks?.length || !activeGroupPoints.some((p) => p.number != null && Number.isFinite(p.number))) {
+      return buildPreviewOrderForGroup(project, activeNumberingGroup).route;
     }
     return [...activeGroupPoints].sort((a, b) => {
       const aHasNumber = a.number != null && Number.isFinite(a.number);
@@ -1852,7 +1851,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
       if (aHasNumber !== bHasNumber) return aHasNumber ? -1 : 1;
       return (a.x - b.x) || (b.y - a.y);
     });
-  }, [activeGroupPoints, activeNumberingGroup]);
+  }, [activeGroupPoints, activeNumberingGroup, project.points, project.groups, project.pipelines, project.numberingMode]);
   const previewBelongsToActiveGroup = Boolean(activeNumberingGroup && numberingPreview.groupId === activeNumberingGroup.id && storedPreviewRoutePoints.length);
   const effectiveRoutePoints = previewBelongsToActiveGroup ? storedPreviewRoutePoints : numberedFallbackAutoPoints;
   const activeFlowEndpoints = groupFlow.endpoints.find(entry => entry.groupId === activeNumberingGroup?.id);
@@ -3172,7 +3171,7 @@ export function CanvasView({ width, height, onPointerUpdate }: Props) {
               onMouseDown={(event) => { event.cancelBubble = true; }}
               onTouchStart={(event) => { event.cancelBubble = true; }}
               onClick={(event) => { event.cancelBubble = true; }}
-              onDragStart={(event) => { event.cancelBubble = true; pushHistory(); }}
+              onDragStart={(event) => { event.cancelBubble = true; }}
               onDragEnd={(event) => {
                 event.cancelBubble = true;
                 updateGroupMeta(label.id, { groupNumberLabelOffset: {

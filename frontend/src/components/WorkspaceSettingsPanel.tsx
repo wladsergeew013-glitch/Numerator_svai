@@ -1,10 +1,9 @@
 import { useWorkspaceTab } from '../utils/workspacePreferences';
-import { changedFields } from '../utils/configPatch';
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { DraggablePanel } from './DraggablePanel';
 import { useProjectStore } from '../store/useProjectStore';
 import { SELECTION_DRAG_MODE_DESCRIPTIONS, SELECTION_DRAG_MODE_LABELS, SelectionDragMode, WORKSPACE_BACKGROUND_COLORS } from '../types/project';
-import { createDesktopShortcut, deleteUserIcon, getUserConfig, listUserIcons, resolveApiAssetUrl, registerConfigDraftFlusher, saveUserConfig, selectAutosaveFolder, uploadApplicationIcon, uploadUserIcon, type AutosaveSettingsPayload, type NanoCadVersion, UserIconInfo } from '../api/client';
+import { createDesktopShortcut, deleteUserIcon, flushUserConfig, getUserConfig, listUserIcons, peekUserConfig, queueUserConfigPatch, resolveApiAssetUrl, registerConfigDraftFlusher, saveUserConfig, selectAutosaveFolder, uploadApplicationIcon, uploadUserIcon, type AutosaveSettingsPayload, type NanoCadVersion, UserIconInfo } from '../api/client';
 import { RIBBON_COMMANDS, RibbonCommandId, getRibbonCommandDefaultIcon } from '../utils/commandRegistry';
 import { makeUiSettingsFile, parseUiSettingsFile } from '../utils/projectFiles';
 
@@ -136,7 +135,9 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
   const [userIcons, setUserIcons] = useState<UserIconInfo[]>([]);
   const [commandIcons, setCommandIcons] = useState<Record<string, string>>({});
   const [iconStatus, setIconStatus] = useState('');
-  const [autosaveSettings, setAutosaveSettings] = useState<Required<AutosaveSettingsPayload>>(() => normalizeAutosaveSettings(null));
+  const [autosaveSettings, setAutosaveSettings] = useState(() => normalizeAutosaveSettings(peekUserConfig().autosaveSettings));
+  const autosaveEdits = useRef<AutosaveSettingsPayload>({});
+  const autosaveEditRevision = useRef(0);
   const [autosaveStatus, setAutosaveStatus] = useState('');
   const [nanoCadVersion, setNanoCadVersion] = useState<NanoCadVersion>('auto');
   const [nanoCadSettingsReady, setNanoCadSettingsReady] = useState(false);
@@ -248,7 +249,7 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
       .then((config) => {
         if (cancelled) return;
         setCommandIcons(config.commandIcons ?? {});
-        setAutosaveSettings(normalizeAutosaveSettings(config.autosaveSettings));
+        setAutosaveSettings({ ...normalizeAutosaveSettings(config.autosaveSettings), ...autosaveEdits.current });
         setNanoCadVersion(config.nanoCadVersion ?? 'auto');
         setNanoCadSettingsReady(true);
       })
@@ -294,12 +295,32 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
   };
 
 
-  const saveAutosaveSettingsToConfig = async (next: Required<AutosaveSettingsPayload>) => {
-    const patch: AutosaveSettingsPayload = changedFields({ ...next }, { ...autosaveSettings });
+  const editAutosaveSettings = (patch: AutosaveSettingsPayload) => {
+    autosaveEditRevision.current += 1;
+    autosaveEdits.current = { ...autosaveEdits.current, ...patch };
     setAutosaveSettings(current => ({ ...current, ...patch }));
+    setAutosaveStatus('');
+  };
+
+  const queueAutosaveEdits = () => {
+    if (!Object.keys(autosaveEdits.current).length) return;
+    queueUserConfigPatch({ autosaveSettings: autosaveEdits.current });
+    autosaveEdits.current = {};
+  };
+
+  useEffect(() => {
+    const unregister = registerConfigDraftFlusher(queueAutosaveEdits);
+    return () => { unregister(); queueAutosaveEdits(); };
+  }, []);
+
+  const saveAutosaveSettingsToConfig = async (patch?: AutosaveSettingsPayload) => {
+    if (patch) editAutosaveSettings(patch);
+    const revision = autosaveEditRevision.current;
     try {
-      const saved = await saveUserConfig({ autosaveSettings: patch });
-      window.dispatchEvent(new CustomEvent('pile-numbering:autosave-settings-updated', { detail: normalizeAutosaveSettings(saved.autosaveSettings) }));
+      queueAutosaveEdits();
+      const saved = await flushUserConfig();
+      if (revision !== autosaveEditRevision.current) return;
+      setAutosaveSettings(normalizeAutosaveSettings(saved.autosaveSettings));
       setAutosaveStatus('Настройки автосохранения сохранены.');
     } catch (error) {
       setAutosaveStatus(error instanceof Error ? error.message : 'Не удалось сохранить автосохранение');
@@ -328,7 +349,7 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
         setAutosaveStatus('Выбор папки отменён.');
         return;
       }
-      await saveAutosaveSettingsToConfig({ ...autosaveSettings, folderPath });
+      await saveAutosaveSettingsToConfig({ folderPath });
     } catch (error) {
       setAutosaveStatus(error instanceof Error ? error.message : 'Не удалось выбрать папку');
     }
@@ -769,7 +790,7 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
               <input
                 type="checkbox"
                 checked={autosaveSettings.enabled}
-                onChange={(event) => void saveAutosaveSettingsToConfig({ ...autosaveSettings, enabled: event.target.checked })}
+                onChange={(event) => void saveAutosaveSettingsToConfig({ enabled: event.target.checked })}
               />
               <span>Включить автосохранение</span>
             </label>
@@ -779,13 +800,13 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
                 type="text"
                 value={autosaveSettings.folderPath ?? ''}
                 placeholder="Пусто = папка autosaves рядом с приложением"
-                onChange={(event) => setAutosaveSettings({ ...autosaveSettings, folderPath: event.target.value || null })}
-                onBlur={() => void saveAutosaveSettingsToConfig(autosaveSettings)}
+                onChange={(event) => editAutosaveSettings({ folderPath: event.target.value || null })}
+                onBlur={() => void saveAutosaveSettingsToConfig()}
               />
             </label>
             <div className="outline-tools-actions autosave-actions-row">
               <button className="btn small" onClick={() => void chooseAutosaveFolder()}>Выбрать папку</button>
-              <button className="btn small primary" onClick={() => void saveAutosaveSettingsToConfig(autosaveSettings)}>Сохранить настройки</button>
+              <button className="btn small primary" onClick={() => void saveAutosaveSettingsToConfig()}>Сохранить настройки</button>
             </div>
             <label className="settings-grid-row">
               <span>Интервал, мин</span>
@@ -795,8 +816,8 @@ export function WorkspaceSettingsPanel({ onClose, toolbarHeight, statusBarHeight
                 max="120"
                 step="0.25"
                 value={autosaveSettings.intervalMinutes}
-                onChange={(event) => setAutosaveSettings({ ...autosaveSettings, intervalMinutes: clamp(Number(event.target.value), 0.25, 120, 5) })}
-                onBlur={() => void saveAutosaveSettingsToConfig(autosaveSettings)}
+                onChange={(event) => editAutosaveSettings({ intervalMinutes: clamp(Number(event.target.value), 0.25, 120, 5) })}
+                onBlur={() => void saveAutosaveSettingsToConfig()}
               />
             </label>
             <div className="settings-help">

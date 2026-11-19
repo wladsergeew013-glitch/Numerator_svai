@@ -17,6 +17,8 @@
 
 `node tools/checks/build_native_panels_check.mjs` и затем `backend/.venv/Scripts/python.exe tools/checks/native_panels_runtime.py` проверяют перенос панелей в настоящие окна WebView2 на Windows, ввод, общий Undo и закрытие. Используются отдельные тестовые данные; результат сохраняется в `tools/out/native-panels-runtime-data/result.json`.
 
+Для проверки собранного EXE на Windows запусти `backend/.venv/Scripts/python.exe tools/checks/packaged_desktop_check.py dist/PileNumbering.exe --version 0.3.4`, подставив проверяемый файл и его версию. Скрипт копирует EXE в отдельную папку, проверяет сохранение при закрытии и восстановление рабочего пространства после перезапуска. Журнал приложения и `result.json` остаются в `tools/out/packaged-desktop-*`.
+
 ## EXE launcher
 
 `tools/exe_launcher.py` — обязательный входной файл для `06_build_exe.bat`.

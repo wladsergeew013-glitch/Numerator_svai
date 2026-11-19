@@ -10,6 +10,7 @@ import ipaddress
 from urllib.parse import urlsplit
 from http.cookies import SimpleCookie
 from starlette.responses import JSONResponse
+from app.project_limits import MAX_PROJECT_JSON_BYTES
 
 SESSION_TOKEN = secrets.token_urlsafe(32)
 # Cookies are scoped by host, not port. Separate local app processes must not
@@ -17,6 +18,7 @@ SESSION_TOKEN = secrets.token_urlsafe(32)
 SESSION_COOKIE = 'pile_session_' + secrets.token_hex(8)
 DEV_ORIGINS = {'http://localhost:5173', 'http://127.0.0.1:5173'}
 MAX_BODY = 16_200_000
+PROJECT_BODY_PATHS = {'/api/projects/local/save', '/api/projects/validate', '/api/autosave/project'}
 
 
 class LocalApiBoundary:
@@ -27,8 +29,10 @@ class LocalApiBoundary:
         if scope['type'] != 'http':
             return await self.app(scope, receive, send)
         headers = {k.decode('latin1').lower(): v.decode('latin1') for k, v in scope['headers']}
+        cors_headers = {}
+
         async def reject(code, message):
-            await JSONResponse({'detail': message}, status_code=code)(scope, receive, send)
+            await JSONResponse({'detail': message}, status_code=code, headers=cors_headers)(scope, receive, send)
         try:
             peer = ipaddress.ip_address(scope.get('client', ('', 0))[0])
             permitted_peer = peer.is_loopback or (os.environ.get('PILE_NUMBERING_TRUST_CONTAINER_PEERS') == '1' and peer.is_private)
@@ -65,11 +69,12 @@ class LocalApiBoundary:
                     return await reject(403, 'Referer is not allowed')
             if headers.get('sec-fetch-site') == 'cross-site':
                 return await reject(403, 'Cross-site request is not allowed')
+            if origin:
+                cors_headers = {'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Credentials': 'true', 'Vary': 'Origin'}
             if scope['method'] == 'OPTIONS':
                 if origin not in allowed:
                     return await reject(403, 'Origin is required')
-                await JSONResponse({}, headers={'Access-Control-Allow-Origin': origin, 'Vary': 'Origin',
-                    'Access-Control-Allow-Credentials': 'true', 'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
+                await JSONResponse({}, headers={**cors_headers, 'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
                     'Access-Control-Allow-Headers': 'Content-Type,X-Pile-Client,X-Pile-Token'})(scope, receive, send)
                 return
             if path == '/api/session':
@@ -77,7 +82,7 @@ class LocalApiBoundary:
                     return await reject(403, 'Explicit local client handshake is required')
                 response = JSONResponse({'token': SESSION_TOKEN}, headers={'Cache-Control': 'no-store'})
                 response.set_cookie(SESSION_COOKIE, SESSION_TOKEN, httponly=True, samesite='strict', path='/api')
-                if origin: response.headers.update({'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Credentials': 'true', 'Vary': 'Origin'})
+                response.headers.update(cors_headers)
                 return await response(scope, receive, send)
             cookie = SimpleCookie()
             try: cookie.load(headers.get('cookie', ''))
@@ -89,7 +94,11 @@ class LocalApiBoundary:
             token = headers.get('x-pile-token', '') or (cookie[SESSION_COOKIE].value if image_read and SESSION_COOKIE in cookie else '')
             if not hmac.compare_digest(token.encode('utf-8'), SESSION_TOKEN.encode('ascii')):
                 return await reject(401, 'Local session credential is required')
-        limit = 2_100_000 if path in {'/api/config/app-icon', '/api/assets/icons'} else MAX_BODY
+        limit = MAX_BODY
+        if path in {'/api/config/app-icon', '/api/assets/icons'}:
+            limit = 2_100_000
+        elif scope['method'] == 'POST' and path in PROJECT_BODY_PATHS:
+            limit = MAX_PROJECT_JSON_BYTES + 4_000_000
         try:
             length = int(headers.get('content-length', '0'))
             if length < 0: raise ValueError()
@@ -114,7 +123,7 @@ class LocalApiBoundary:
             body = chunks[position]; position += 1
             return {'type': 'http.request', 'body': body, 'more_body': position < len(chunks)}
         async def cors_send(message):
-            if message['type'] == 'http.response.start' and headers.get('origin'):
-                message['headers'] = list(message.get('headers', [])) + [(b'access-control-allow-origin', headers['origin'].encode()), (b'access-control-allow-credentials', b'true'), (b'vary', b'Origin')]
+            if message['type'] == 'http.response.start' and cors_headers:
+                message['headers'] = list(message.get('headers', [])) + [(key.lower().encode('ascii'), value.encode('ascii')) for key, value in cors_headers.items()]
             await send(message)
         await self.app(scope, replay, cors_send)

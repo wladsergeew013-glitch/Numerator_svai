@@ -9,7 +9,7 @@ interface Props {
 }
 
 export function StatusBar({ x, y, zoom, pointsCount }: Props) {
-  const { selectedPointIds, selectedGroupId, project, pointInfoVisible, editingTool, editPointPickMode, numberingPickMode, numberingPreview } = useProjectStore();
+  const { selectedPointIds, selectedGroupId, project, pointInfoVisible, editingTool, editPointPickMode, numberingPickMode, numberingPreview, numberingRouteError } = useProjectStore();
   const group = project.groups.find((g) => g.id === selectedGroupId);
   const noNumberCount = useMemo(() => project.points.reduce((count, point) => count + (point.number == null ? 1 : 0), 0), [project.points]);
   const mode =
@@ -44,7 +44,7 @@ export function StatusBar({ x, y, zoom, pointsCount }: Props) {
       <span>Без номера: {noNumberCount}</span>
       <span>Выбрано: {selectedPointIds.length}</span>
       <span>Группа: {group?.name ?? 'не выбрана'}</span>
-      <span>Режим: {mode}</span>
+      {numberingRouteError ? <span role="alert" title={numberingRouteError}>{numberingRouteError}</span> : <span>Режим: {mode}</span>}
     </footer>
   );
 }

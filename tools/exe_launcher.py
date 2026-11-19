@@ -256,6 +256,7 @@ class DesktopApi:
         self._ready = False
         self._shown = False
         self._allow_close = False
+        self._close_prepared = False
         self._panels = None
         # Session-only state: the next dialog starts where the user last chose a project.
         self._project_dialog_dir = APP_DIR / "projects"
@@ -288,16 +289,33 @@ class DesktopApi:
             logging.info("Desktop workspace ready, closing splash")
             _splash_close()
 
-    def closeConfirmed(self) -> None:  # noqa: N802
-        if self._window is not None:
-            from app import cad_operations
+    def prepareClose(self) -> None:  # noqa: N802
+        from app import cad_operations
+        if not self._close_prepared:
             if not cad_operations.shutdown(LOG_DIR / 'cad-shutdown.json'):
                 raise RuntimeError('CAD ещё завершает отменённую команду. Дождитесь подтверждения или срока её действия и повторите закрытие.')
+            self._close_prepared = True
+
+    def cancelClose(self) -> None:  # noqa: N802
+        from app import cad_operations
+        if not self._allow_close:
+            self._close_prepared = False
+            cad_operations.resume_after_shutdown()
+
+    def closeConfirmed(self) -> None:  # noqa: N802
+        if self._window is None:
+            return
+        try:
+            self.prepareClose()
             if self._panels is not None:
                 from System import Action
                 self._window.native.Invoke(Action(self._panels.shutdown))
             self._allow_close = True
             self._window.destroy()
+        except Exception:
+            self._allow_close = False
+            self.cancelClose()
+            raise
 
     def _on_closing(self) -> bool:
         if self._allow_close:

@@ -7,6 +7,7 @@ from uuid import uuid4
 import math
 
 from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, field_validator, model_validator
+from app.project_limits import MAX_PROJECT_POINTS
 
 SAFE_INTEGER = 2**53 - 1
 
@@ -249,7 +250,7 @@ class OperationRecord(BaseModel):
 class PileProject(BaseModel):
     schemaVersion: int = 1
     project: ProjectInfo = Field(default_factory=ProjectInfo)
-    points: list[PilePoint] = Field(default_factory=list)
+    points: list[PilePoint] = Field(default_factory=list, max_length=MAX_PROJECT_POINTS)
     groups: list[PileGroup] = Field(default_factory=list)
     pipelines: list[NumberingPipeline] = Field(default_factory=lambda: [NumberingPipeline(id="pipeline-main", name="Пайплайн 1", order=1)])
     numberingMode: NumberingMode = NumberingMode.global_sequential

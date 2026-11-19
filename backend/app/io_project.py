@@ -3,9 +3,11 @@ from __future__ import annotations
 import csv
 import io
 import math
+from itertools import chain, islice
 from typing import Iterable
 from uuid import uuid4
 
+from app.project_limits import MAX_PROJECT_JSON_BYTES, MAX_PROJECT_POINTS
 from app.schemas import CsvImportResponse, PilePoint, PileProject, SyncState
 
 
@@ -50,97 +52,87 @@ def _parse_float(value: str | None, row_number: int, col_name: str) -> float:
     return result
 
 
-def import_points_from_csv(content: bytes) -> CsvImportResponse:
-    """Import CSV with headers X,Y,Number or without headers x,y,number.
+CSV_DELIMITERS = (';', ',', '\t')
 
-    CSV remains an exchange format only. Internal point id is generated separately
-    and is never equal to the pile number.
-    """
-    text = _read_csv_text(content)
-    sample = text[:2048]
-    if not sample.strip():
-        raise ValueError('CSV is empty')
+
+def _csv_records(text: str, delimiter: str):
+    reader = csv.reader(io.StringIO(text, newline=''), delimiter=delimiter, strict=True)
+    for row in reader:
+        if any(cell.strip() for cell in row):
+            yield reader.line_num, row
+
+
+def _is_number(value: str) -> bool:
     try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-        first = next(csv.reader(io.StringIO(text), dialect=dialect, strict=True))
-    except (csv.Error, StopIteration) as exc:
-        raise ValueError('CSV: cannot determine columns or delimiter') from exc
-    if len(first) < 2:
-        raise ValueError('CSV must contain X and Y columns')
-    has_header = _find_column(first, X_ALIASES) is not None and _find_column(first, Y_ALIASES) is not None
+        _parse_float(value, 0, 'coordinate')
+        return True
+    except ValueError:
+        return False
+
+
+def _csv_delimiter(text: str) -> str:
+    best_score = -1
+    selected = None
+    for delimiter in CSV_DELIMITERS:
+        try:
+            sample = [row for _, row in islice(_csv_records(text, delimiter), 12)]
+        except csv.Error:
+            continue
+        if not sample or len(sample[0]) < 2:
+            continue
+        first = sample[0]
+        x_col, y_col = _find_column(first, X_ALIASES), _find_column(first, Y_ALIASES)
+        has_header = x_col is not None and y_col is not None
+        x_index, y_index = (first.index(x_col), first.index(y_col)) if has_header else (0, 1)
+        numeric = sum(len(row) > max(x_index, y_index) and _is_number(row[x_index]) and _is_number(row[y_index])
+                      for row in sample[int(has_header):])
+        consistent = sum(len(row) == len(first) for row in sample)
+        score = (1000 if has_header else 0) + numeric * 20 + consistent
+        if score > best_score:
+            best_score, selected = score, delimiter
+    if selected is None:
+        raise ValueError('CSV: cannot determine columns or delimiter')
+    return selected
+
+
+def import_points_from_csv(content: bytes) -> CsvImportResponse:
+    """Read X/Y and optional source number/ID, preserving quoted field values."""
+    text = _read_csv_text(content)
+    delimiter = _csv_delimiter(text)
+    records = _csv_records(text, delimiter)
+    first_record = next(records)
+    first = first_record[1]
+    x_col, y_col = _find_column(first, X_ALIASES), _find_column(first, Y_ALIASES)
+    has_header = x_col is not None and y_col is not None
+    if has_header:
+        x_index, y_index = first.index(x_col), first.index(y_col)
+        n_col, id_col = _find_column(first, N_ALIASES), _find_column(first, ID_ALIASES)
+        n_index = first.index(n_col) if n_col is not None else None
+        id_index = first.index(id_col) if id_col is not None else None
+    else:
+        records = chain((first_record,), records)
+        x_index, y_index, n_index, id_index = 0, 1, 2, None
 
     points: list[PilePoint] = []
-
-    if has_header:
-        reader = csv.DictReader(io.StringIO(text), dialect=dialect)
-        fieldnames = reader.fieldnames or []
-        x_col = _find_column(fieldnames, X_ALIASES)
-        y_col = _find_column(fieldnames, Y_ALIASES)
-        n_col = _find_column(fieldnames, N_ALIASES)
-        id_col = _find_column(fieldnames, ID_ALIASES)
-
-        if not x_col or not y_col:
-            raise ValueError(f"CSV must contain X and Y columns. Found: {fieldnames}")
-
-        for idx, row in enumerate(reader, start=2):
-            if None in row:
-                raise ValueError(f'Row {idx}: too many columns')
-            if not row or all((v or "").strip() == "" for v in row.values()):
-                continue
-            x = _parse_float(row.get(x_col), idx, x_col)
-            y = _parse_float(row.get(y_col), idx, y_col)
-            source_number = row.get(n_col).strip() if n_col and row.get(n_col) is not None else None
-            source_id = row.get(id_col).strip() if id_col and row.get(id_col) else None
-            if not source_id and source_number:
-                source_id = str(source_number)
-
-            if len(points) >= 100000: raise ValueError('CSV exceeds the limit of 100000 points')
-            points.append(
-                PilePoint(
-                    id=f"p-{uuid4().hex[:12]}",
-                    sourceId=source_id,
-                    x=x,
-                    y=y,
-                    sourceNumber=source_number,
-                    number=None,
-                    groupId=None,
-                    locked=False,
-                    manualNumber=False,
-                    syncState=SyncState.added,
-                )
-            )
-    else:
-        reader2 = csv.reader(io.StringIO(text), dialect=dialect)
-        for idx, row in enumerate(reader2, start=1):
-            if not row or all(c.strip() == "" for c in row):
-                continue
-            if len(row) < 2:
-                raise ValueError(f"Row {idx}: expected at least x,y")
-            x = _parse_float(row[0], idx, "x")
-            y = _parse_float(row[1], idx, "y")
-            source_number = row[2].strip() if len(row) >= 3 and row[2].strip() else None
-            source_id = str(source_number) if source_number else None
-            if len(points) >= 100000: raise ValueError('CSV exceeds the limit of 100000 points')
-            points.append(
-                PilePoint(
-                    id=f"p-{uuid4().hex[:12]}",
-                    sourceId=source_id,
-                    x=x,
-                    y=y,
-                    sourceNumber=source_number,
-                    number=None,
-                    groupId=None,
-                    locked=False,
-                    manualNumber=False,
-                    syncState=SyncState.added,
-                )
-            )
-
+    for row_number, row in records:
+        if has_header and len(row) > len(first):
+            raise ValueError(f'Row {row_number}: too many columns')
+        def cell(index):
+            return row[index] if index is not None and index < len(row) else None
+        x = _parse_float(cell(x_index), row_number, x_col or 'x')
+        y = _parse_float(cell(y_index), row_number, y_col or 'y')
+        source_number = (cell(n_index) or '').strip() or None
+        source_id = (cell(id_index) or '').strip() or source_number
+        if len(points) >= MAX_PROJECT_POINTS:
+            raise ValueError(f'CSV exceeds the limit of {MAX_PROJECT_POINTS} points')
+        points.append(PilePoint(id=f'p-{uuid4().hex[:12]}', sourceId=source_id, x=x, y=y,
+                                sourceNumber=source_number, syncState=SyncState.added))
     if not points:
         raise ValueError('CSV contains no points')
-    if len(points) > 100000:
-        raise ValueError('CSV exceeds the limit of 100000 points')
-    return CsvImportResponse(points=points)
+    result = CsvImportResponse(points=points)
+    if len(result.model_dump_json().encode('utf-8')) > MAX_PROJECT_JSON_BYTES:
+        raise ValueError('Данные импорта превышают 64 МБ в JSON. Разделите CSV на несколько файлов.')
+    return result
 
 
 def export_project_json(project: PileProject) -> dict:

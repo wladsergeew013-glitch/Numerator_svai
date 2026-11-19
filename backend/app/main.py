@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import csv
+import errno
 import math
 import tempfile
 import inspect
@@ -29,6 +30,7 @@ from app.version import APP_VERSION
 
 from app.io_project import import_points_from_csv
 from app.project_files import ProjectFileConflict, save_project_file, project_file_lock, atomic_write_project
+from app.project_limits import MAX_PROJECT_JSON_BYTES
 from app.runtime_paths import RuntimePaths
 from app.http_boundary import LocalApiBoundary
 from app.recent_projects import list_recent_projects as read_recent_projects, remember_recent_project
@@ -215,7 +217,10 @@ def _ensure_data_dir() -> None:
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _safe_file_name(value: str) -> str:
+PROJECT_FILE_SUFFIX = '.pilenum.json'
+
+
+def _safe_file_name(value: str, *, suffix: str = PROJECT_FILE_SUFFIX) -> str:
     name = (value or "project").strip()
     name = re.sub(r"[\x00-\x1f\x7f\\/:*?\"<>|]+", "_", name)
     name = re.sub(r"\s+", "_", name)
@@ -223,12 +228,13 @@ def _safe_file_name(value: str) -> str:
     stem = name.split('.')[0].upper()
     if stem in {'CON', 'PRN', 'AUX', 'NUL', 'CLOCK$', 'CONIN$', 'CONOUT$', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10)), 'COM¹', 'COM²', 'COM³', 'LPT¹', 'LPT²', 'LPT³'}:
         name = '_' + name
-    suffix = '.pilenum.json'
-    if name.lower().endswith(suffix): name = name[:-len(suffix)]
-    name = name[:160].rstrip('._ ') or 'project'
-    if not name.lower().endswith(".pilenum.json"):
-        name = f"{name}.pilenum.json"
-    return name
+    if name.lower().endswith(PROJECT_FILE_SUFFIX):
+        name = name[:-len(PROJECT_FILE_SUFFIX)]
+    # Keep the existing character cap for Windows and respect NAME_MAX in
+    # Linux/Docker, including the complete suffix and without splitting UTF-8.
+    budget = 255 - len(suffix.encode('utf-8'))
+    name = name[:160].encode('utf-8', errors='ignore')[:budget].decode('utf-8', errors='ignore').rstrip('._ ') or 'project'
+    return f'{name}{suffix}'
 
 
 def _safe_project_path(file_name: str, *, existing: bool = False) -> Path:
@@ -259,9 +265,21 @@ def _safe_autosave_folder(folder_path: str | None) -> Path:
 
 
 def _autosave_file_name(project: PileProject) -> str:
-    base = _safe_file_name(project.project.name).replace('.pilenum.json', '')
     stamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-    return f"{base}.autosave_{stamp}.pilenum.json"
+    return _safe_file_name(project.project.name, suffix=f'.autosave_{stamp}{PROJECT_FILE_SUFFIX}')
+
+
+def _project_json(project: PileProject, *, include_ui=False) -> str:
+    content = project.model_dump_json(exclude=None if include_ui else {'gridSettings', 'viewSettings'})
+    if len(content.encode('utf-8')) > MAX_PROJECT_JSON_BYTES:
+        raise HTTPException(413, 'Проект превышает 64 МБ в JSON. Разделите данные на несколько проектов.')
+    return content
+
+
+def _project_write_error(exc: OSError) -> HTTPException:
+    if exc.errno in {errno.ENAMETOOLONG, errno.EINVAL} or getattr(exc, 'winerror', None) in {123, 206}:
+        return HTTPException(400, 'Имя файла или путь к папке слишком длинный либо содержит недопустимые символы.')
+    return HTTPException(503, f'Не удалось записать проект: {exc.strerror or exc}')
 
 
 def _project_summary(path: Path) -> LocalProjectInfo:
@@ -502,15 +520,16 @@ def save_local_project(project: PileProject) -> LocalProjectSaveResponse:
     _ensure_projects_dir()
     project.project.updatedAt = datetime.now(timezone.utc).isoformat()
     file_name = _safe_file_name(project.project.name)
-    path = _safe_project_path(file_name)
-    project.project.fileName = path.name
-    payload = project.model_dump(mode="json", exclude={"gridSettings", "viewSettings"})
     try:
-        save_project_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
+        path = _safe_project_path(file_name)
+        project.project.fileName = path.name
+        save_project_file(path, _project_json(project))
     except ProjectFileConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     except TimeoutError as exc:
         raise HTTPException(503, str(exc)) from exc
+    except OSError as exc:
+        raise _project_write_error(exc) from exc
     remember_recent_project(CONFIG_DIR, path)
     return LocalProjectSaveResponse(saved=True, fileName=path.name, name=project.project.name)
 
@@ -577,18 +596,18 @@ def validate_project(project: PileProject) -> ValidateProjectResponse:
 
 @app.post("/api/autosave/project", response_model=AutosaveProjectResponse)
 def autosave_project(request: AutosaveProjectRequest) -> AutosaveProjectResponse:
-    folder = _safe_autosave_folder(request.folderPath)
     project = request.project
     project.project.updatedAt = datetime.now(timezone.utc).isoformat()
     file_name = _autosave_file_name(project)
-    path = folder / file_name
-    payload = project.model_dump(mode="json")
     try:
-        save_project_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
+        path = _safe_autosave_folder(request.folderPath) / file_name
+        save_project_file(path, _project_json(project, include_ui=True))
     except ProjectFileConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     except TimeoutError as exc:
         raise HTTPException(503, str(exc)) from exc
+    except OSError as exc:
+        raise _project_write_error(exc) from exc
     return AutosaveProjectResponse(saved=True, fileName=file_name, path=str(path))
 
 
@@ -1108,6 +1127,7 @@ def _filter_export_points(points: list[NanoCadExportPoint], selected_group_ids: 
 def _invalidate_scan_caches():
     _MODELSTUDIO_SCAN_CACHE.clear()
     _BLOCK_SCAN_CACHE.clear()
+    cad.update_counts(scanCachesInvalidated=True)
 
 
 def _live_export_record(doc, candidate, kind, tolerance):
@@ -2577,8 +2597,12 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
     else:
         ms, resolved_scope = _cad_scope(doc, ms, request.scope)
     all_source_points = _filter_export_points(request.points, request.selectedGroupIds)
-    source_points = [p for p in all_source_points if _export_number_text(p) is not None]
     allowed_names = _modelstudio_allowed_names(request.objectName, request.selectedObjectNames)
+    numbered_points = [p for p in all_source_points if _export_number_text(p) is not None]
+    # A known excluded type cannot become a target by handle or coordinates,
+    # and its binding to another drawing is irrelevant to this export.
+    source_points = [p for p in numbered_points if not allowed_names or
+                     not p.meta.get('objectName') or p.meta['objectName'] in allowed_names]
     document_path = str(getattr(doc, 'FullName', '') or '')
     cad.emit('modelstudio_export_document', document=document_path, mode=request.matchMode,
              parameter=request.numberParameter, parametersByObject=request.selectedObjectParameters or {},
@@ -2617,6 +2641,7 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
         selected_handles = ({item['handle'] for item in snapshot['objects']} if snapshot else
                             {str(entity.Handle).upper() for entity in cad.entities(ms)})
     direct_handles = set()
+    excluded_indices = set()
 
     def targets():
         nonlocal unresolved
@@ -2637,8 +2662,9 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
                     if not _has_modelstudio_element(entity):
                         unresolved += 1
                         continue
+                    live_name = _modelstudio_name(entity)
                     expected_name = str(point.meta.get('objectName') or '')
-                    if expected_name and _modelstudio_name(entity) != expected_name:
+                    if expected_name and live_name != expected_name:
                         unresolved += 1
                         continue
                 except Exception as exc:
@@ -2647,7 +2673,10 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
                     cad.emit('modelstudio_handle_not_found', pointId=point.id, handle=handle, error=str(exc))
                     continue
                 direct_handles.add(handle)
-                yield entity, (index, point, 0)
+                if allowed_names and live_name not in allowed_names:
+                    excluded_indices.add(index)
+                    continue
+                yield entity, (index, point, 0, live_name)
             cad.progress('Проверка сохранённых handle и запись номеров', len(source_points), len(source_points), updated=updated, failed=failed)
         if request.matchMode == 'coordinates' or (request.matchMode == 'auto' and len(direct_handles) < len(source_points)):
             cad.emit('modelstudio_coordinate_scan_started', remainingPoints=len(source_points) - len(used))
@@ -2660,15 +2689,17 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
 
     target_items = list(targets())
     direct_items = [(entity, found) for entity, found in target_items if found is not None]
-    direct_indices = {found[0] for entity, found in direct_items}
+    direct_indices = {found[0] for entity, found in direct_items} | excluded_indices
     records = []
     for candidate, found in target_items:
         if found is not None: continue
+        if snapshot and allowed_names and candidate['name'] not in allowed_names:
+            continue
         record = _live_export_record(doc, candidate, 'model_studio', request.tolerance)
         if record and (not allowed_names or record['name'] in allowed_names): records.append(record)
     coordinate_items = _coordinate_export_plan(records, source_points, request.baseX, request.baseY, request.tolerance, direct_indices)
     coordinate_indices = {found[0] for record, found in coordinate_items}
-    prepared = direct_items + [(record['entity'], found) for record, found in coordinate_items]
+    prepared = direct_items + [(record['entity'], (*found, record['name'])) for record, found in coordinate_items]
     scanned = len(direct_items) + len(records)
     skipped_no_coordinates = sum(record['insertion'] is None for record in records)
     for entity, direct in prepared:
@@ -2676,9 +2707,8 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
         if not _has_modelstudio_element(entity):
             raise HTTPException(409, 'Тип объекта изменился до записи.')
         name = _modelstudio_name(entity)
-        index, point, _dist = direct
-        expected_name = str(point.meta.get('objectName') or '')
-        if (expected_name and expected_name != name) or (allowed_names and name not in allowed_names):
+        index, point, _dist, planned_name = direct
+        if name != planned_name:
             raise HTTPException(409, 'Тип объекта изменился до записи.')
         used.add(index)
         matched += 1
@@ -2695,12 +2725,12 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
                 failures.append({'pointId': point.id, 'objectName': name, 'error': 'Не задан параметр номера'})
             cad.emit('modelstudio_write_parameter_missing', pointId=point.id, objectName=name)
             continue
-        _invalidate_scan_caches()
         if index in coordinate_indices:
             live = _live_export_record(doc, entity, 'model_studio', request.tolerance)
             if not live or live['name'] != name or not live['insertion'] or math.hypot(live['insertion'][0]-point.x-request.baseX, live['insertion'][1]-point.y-request.baseY) > request.tolerance:
                 raise HTTPException(409, 'Объект изменился до записи. Повторите сканирование.')
             entity = live['entity']
+        _invalidate_scan_caches()
         handle = str(getattr(entity, 'Handle', '') or '')
         try:
             success = _set_modelstudio_parameter(entity, parameter_name, value)
@@ -2738,8 +2768,9 @@ def export_modelstudio_objects(request: NanoCadModelStudioExportRequest) -> dict
             except Exception as exc:
                 save_error = str(exc)
                 _log_backend_error('modelstudio_drawing_save_failed', exc, {'document': document_path, 'updated': updated})
-    return {'updated': updated, 'matched': matched, 'scanned': scanned, 'points': len(all_source_points), 'skippedUnnumbered': len(all_source_points)-len(source_points),
-            'unusedPoints': len(source_points) - len(used), 'missingParameter': failed, 'failedWrites': failed,
+    return {'updated': updated, 'matched': matched, 'scanned': scanned, 'points': len(all_source_points), 'skippedUnnumbered': len(all_source_points)-len(numbered_points),
+            'skippedObjectTypes': len(numbered_points) - len(source_points) + len(excluded_indices),
+            'unusedPoints': len(source_points) - len(used) - len(excluded_indices), 'missingParameter': failed, 'failedWrites': failed,
             'unresolvedHandles': unresolved, 'failures': failures, 'tolerance': request.tolerance,
             'selectedObjectNames': sorted(allowed_names), 'skippedNoCoordinates': skipped_no_coordinates,
             'unmatchedObjects': unmatched_objects, 'documentName': document_path, 'saved': saved, 'saveError': save_error,

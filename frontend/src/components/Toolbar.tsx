@@ -1,8 +1,9 @@
 import { useWorkspaceList, useWorkspaceTab, useWorkspaceWindow } from '../utils/workspacePreferences';
 import { RIBBON_COMMANDS } from '../utils/commandRegistry';
 import { queueProjectSave } from '../utils/projectSaves';
+import { assertProjectJsonSize } from '../utils/projectLimits';
 import { numberingSpace } from '../utils/numberingSpace';
-import { MAX_IMPORT_BYTES, parseCsvRecords, guessTableHeader, tableWithHeader } from '../utils/tabularImport';
+import { MAX_IMPORT_BYTES, CSV_DELIMITERS, parseCsvRecords, guessTableHeader, tableWithHeader } from '../utils/tabularImport';
 import { workerTask } from '../utils/workerTask';
 import { CommandIcon } from './CommandIcon';
 import { APP_VERSION } from '../version';
@@ -10,7 +11,7 @@ import { CadOperationProgress } from './CadOperationProgress';
 import { runFileOperation } from '../utils/operationLog';
 import { ChangeEvent, CSSProperties, ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CadOperationCancelled, exportNanoCadBlocks, exportNanoCadModelStudioObjects, getUserConfig, importCsv, importNanoCadBlocks, importNanoCadModelStudioObjects, listLocalProjects, openLocalProject, openLocalProjectLocation, pickNanoCadBlockSample, saveLocalProject, peekUserConfig, queueUserConfigPatch, scanNanoCadBlocks, scanNanoCadModelStudioObjects, type CadProgress, type NanoCadBlockSummary, type NanoCadModelStudioObjectSummary } from '../api/client';
-import { useProjectStore } from '../store/useProjectStore';
+import { numberingRouteIssue, useProjectStore } from '../store/useProjectStore';
 import { assertProjectContext, captureProjectContext, isProjectSession, openProjectSafely, runProjectTransition, type ProjectContext } from '../utils/projectSession';
 import { LocalProjectInfo, PileGroup, PilePoint, PileProject } from '../types/project';
 import { DraggablePanel } from './DraggablePanel';
@@ -192,6 +193,7 @@ interface CsvPreviewData {
   previewRows: string[][];
   sourceKind: 'csv' | 'excel';
   sheetName?: string;
+  csvText?: string;
 }
 
 type TransferSource = 'file' | 'nanocad';
@@ -257,8 +259,9 @@ async function readTextFile(file: File) {
 
 async function buildCsvPreview(file: File): Promise<CsvPreviewData> {
   if (file.size > MAX_IMPORT_BYTES) throw new Error('Файл превышает 16 МБ.');
-  const parsed = parseCsvRecords(await readTextFile(file));
-  return { file, fileName: file.name, delimiter: parsed.delimiter, sourceKind: 'csv', ...tableWithHeader(parsed.rows, guessTableHeader(parsed.rows)) };
+  const csvText = await readTextFile(file);
+  const parsed = parseCsvRecords(csvText);
+  return { file, fileName: file.name, csvText, delimiter: parsed.delimiter, sourceKind: 'csv', ...tableWithHeader(parsed.rows, guessTableHeader(parsed.rows)) };
 }
 
 async function buildExcelPreview(file: File): Promise<CsvPreviewData> {
@@ -325,7 +328,6 @@ export function buildModelCheck(project: PileProject): ModelCheckResult {
   const issues: ModelIssue[] = [];
   const groupIds = new Set(project.groups.map((group) => group.id));
   const groupById = new Map(project.groups.map(group => [group.id, group]));
-  const pointById = new Map(project.points.map((point) => [point.id, point]));
   const pointIndex = new Map(project.points.map((point, index) => [point.id, index]));
   const pointsWithoutGroup = project.points.filter((point) => !point.groupId).length;
   const invalidGroupRefPoints = project.points.filter((point) => point.groupId && !groupIds.has(point.groupId));
@@ -379,16 +381,9 @@ export function buildModelCheck(project: PileProject): ModelCheckResult {
 
   const invalidLinks: string[] = [];
   for (const group of project.groups) {
-    const groupPointIds = new Set(project.points.filter((point) => point.groupId === group.id).map((point) => point.id));
-    const seenLinks = new Set<string>();
-    for (const link of group.numbering.manualLinks ?? []) {
-      const key = `${link.fromId}->${link.toId}`;
-      if (seenLinks.has(key)) invalidLinks.push(`${group.name}: дубль связи ${link.fromId.slice(-6)} → ${link.toId.slice(-6)}`);
-      seenLinks.add(key);
-      if (!link.fromId || !link.toId || link.fromId === link.toId) invalidLinks.push(`${group.name}: некорректная ручная связь ${key}`);
-      if (!pointById.has(link.fromId) || !pointById.has(link.toId)) invalidLinks.push(`${group.name}: связь указывает на удалённую точку ${key}`);
-      if (!groupPointIds.has(link.fromId) || !groupPointIds.has(link.toId)) invalidLinks.push(`${group.name}: связь выходит за пределы группы ${key}`);
-    }
+    if (!group.numbering.manualLinks?.length) continue;
+    const issue = numberingRouteIssue(project.points.filter(point => point.groupId === group.id), group.numbering);
+    if (issue) invalidLinks.push(`${group.name}: ${issue}`);
   }
   pushIssue(issues, 'error', 'Проблемы ручных связей', invalidLinks);
 
@@ -507,15 +502,6 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   const [nanoCadModelScanId, setNanoCadModelScanId] = useState<string | null>(null);
   const [nanoCadModelScannedAt, setNanoCadModelScannedAt] = useState<number | null>(null);
   const [nanoCadModelScanScope, setNanoCadModelScanScope] = useState<CadScanScope | null>(null);
-  useEffect(() => {
-    const invalidate = () => {
-      setNanoCadModelScanId(null); setNanoCadBlockScanId(null);
-      setNanoCadModelScannedAt(null); setNanoCadBlockScannedAt(null);
-      setNanoCadModelScanScope(null); setNanoCadBlockScanScope(null);
-    };
-    window.addEventListener('pile-numbering:cad-changed', invalidate);
-    return () => window.removeEventListener('pile-numbering:cad-changed', invalidate);
-  }, []);
   const [nanoCadSelectedModelObject, setNanoCadSelectedModelObject] = useState('');
   const [nanoCadModelNumberParameter, setNanoCadModelNumberParameter] = useState('');
   const [nanoCadModelObjectFilter, setNanoCadModelObjectFilter] = useState('GPP_PILE_NUMBER');
@@ -555,6 +541,17 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
   };
   const [scanScope, setScanScope] = useState<'auto' | 'selection' | 'all'>('auto');
   const scanGeneration = useRef(0);
+  useEffect(() => {
+    const invalidate = () => {
+      scanGeneration.current += 1;
+      setNanoCadModelScanId(null); setNanoCadBlockScanId(null);
+      setNanoCadModelScannedAt(null); setNanoCadBlockScannedAt(null);
+      setNanoCadModelScanScope(null); setNanoCadBlockScanScope(null);
+      setScanStatus('Скан устарел после попытки записи в DWG. Перед следующим обменом обновите скан.');
+    };
+    window.addEventListener('pile-numbering:cad-changed', invalidate);
+    return () => window.removeEventListener('pile-numbering:cad-changed', invalidate);
+  }, []);
   const [saveDrawing, setSaveDrawing] = useState(false);
   const [preserveHandles, setPreserveHandles] = useState(true);
   const [overwriteImportedNumbers, setOverwriteImportedNumbers] = useState(false);
@@ -764,7 +761,8 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
     const report = (message: string) => { setProjectStatus(message); return message; };
     const { gridSettings: _gridSettings, viewSettings: _viewSettings, ...projectPayload } = project;
     const fileName = `${safeFileName(project.project.name || 'project')}${asCopy ? '_копия' : ''}.pilenum.json`;
-    const jsonText = JSON.stringify(asCopy ? makeProjectCopy(project) : projectPayload, null, 2);
+    const jsonText = JSON.stringify(asCopy ? makeProjectCopy(project) : projectPayload);
+    assertProjectJsonSize(jsonText);
     const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
     return queueProjectSave(project.project.id, async () => {
     const success = (path: string) => {
@@ -896,13 +894,7 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
       const preview = await buildImportPreview(file);
       assertProjectContext(context);
       importPreviewContext.current = context;
-      const xIndex = guessColumnIndex(preview.columns, [/^x$/i, /^х$/i, /coord.*x/i, /коорд.*x/i], 0);
-      const yIndex = guessColumnIndex(preview.columns, [/^y$/i, /^у$/i, /coord.*y/i, /коорд.*y/i], Math.min(1, preview.columns.length - 1));
-      const nIndex = preview.columns.findIndex((column) => /^(n|no|num|number|номер|№)$/i.test(column.trim()) || /номер/i.test(column));
-      setImportPreview(preview);
-      setImportXColumn(String(xIndex));
-      setImportYColumn(String(yIndex));
-      setImportNumberColumn(nIndex >= 0 ? String(nIndex) : '');
+      applyImportPreview(preview);
       const sheetText = preview.sheetName ? ` · лист: ${preview.sheetName}` : '';
       setImportStatus(`Файл загружен: ${file.name}${sheetText}. Проверь колонки X/Y и подтверди импорт.`);
     } catch (e) {
@@ -910,6 +902,27 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
       setImportStatus(e instanceof Error ? e.message : 'Не удалось прочитать файл. Для Excel нужен установленный пакет xlsx.');
     } finally {
       input.value = '';
+    }
+  };
+
+  const applyImportPreview = (preview: CsvPreviewData) => {
+    const xIndex = guessColumnIndex(preview.columns, [/^x$/i, /^х$/i, /coord.*x/i, /коорд.*x/i], 0);
+    const yIndex = guessColumnIndex(preview.columns, [/^y$/i, /^у$/i, /coord.*y/i, /коорд.*y/i], Math.min(1, preview.columns.length - 1));
+    const nIndex = preview.columns.findIndex(column => /^(n|no|num|number|номер|№)$/i.test(column.trim()) || /номер/i.test(column));
+    setImportPreview(preview);
+    setImportXColumn(String(xIndex));
+    setImportYColumn(String(yIndex));
+    setImportNumberColumn(nIndex >= 0 ? String(nIndex) : '');
+  };
+
+  const changeImportDelimiter = (delimiter: string) => {
+    if (importPreview?.csvText === undefined) return;
+    try {
+      const parsed = parseCsvRecords(importPreview.csvText, delimiter);
+      applyImportPreview({ ...importPreview, delimiter, ...tableWithHeader(parsed.rows, guessTableHeader(parsed.rows)) });
+      setImportStatus('Предпросмотр перестроен. Проверьте колонки X/Y.');
+    } catch (error) {
+      setImportStatus(error instanceof Error ? error.message : 'Не удалось разобрать CSV с выбранным разделителем.');
     }
   };
 
@@ -1237,19 +1250,11 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
             selectedGroupIds: exportAllPoints ? null : exportSelectedGroupIds
           });
       const message = `${result.updated === 0 ? 'Ничего не записано. Проверьте чертёж, тип объектов, координаты и наличие итоговых номеров. ' : ''}Экспорт nanoCAD${result.reusedScan ? ' из скана' : ''}: обновлено ${result.updated}, сопоставлено ${result.matched}/${result.scanned}, неиспользованных точек ${result.unusedPoints}. Ошибок записи: ${result.failedWrites ?? result.missingAttribute ?? result.missingParameter ?? 0}; не найдены handle: ${result.unresolvedHandles ?? 0}. ${result.saved ? 'DWG сохранён.' : result.updated > 0 ? 'Изменения в открытом чертеже — сохраните DWG в nanoCAD.' : ''}${result.saveError ? ` Ошибка сохранения: ${result.saveError}.` : ''}${result.logFile ? ` Лог: ${result.logFile}` : ''}`;
-      if (result.updated > 0) {
-        if (exportNanoCadMode === 'blocks') setNanoCadBlockScanId(null);
-        else setNanoCadModelScanId(null);
-        setNanoCadTransferStatus('После записи в DWG обновите скан, чтобы импорт прочитал актуальные значения.');
-      }
-      setExportStatus(message);
-      setProjectStatus(message);
+      const summary = result.skippedObjectTypes ? `${message} Пропущено по фильтру типов: ${result.skippedObjectTypes}.` : message;
+      setExportStatus(summary);
+      setProjectStatus(summary);
     } catch (e) {
-      setNanoCadBlockScanId(null);
-      setNanoCadModelScanId(null);
       if (e instanceof CadOperationCancelled) {
-        setNanoCadBlockScanId(null);
-        setNanoCadModelScanId(null);
         setScanStatus('Экспорт остановлен. Часть номеров могла остаться в открытом DWG; перед следующим обменом обновите скан.');
       }
       setExportStatus(e instanceof Error ? e.message : 'Не удалось экспортировать в nanoCAD.');
@@ -1290,10 +1295,13 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
         };
       }
 
-      const result = await saveLocalProject(projectToSave);
+      let applied = false;
+      const result = await saveLocalProject(projectToSave, saved => {
+        applied = useProjectStore.getState().completeProjectSave(projectToSave, context.sessionId, saved.fileName, saved.name);
+        if (applied) recordOperation('local_project_saved', { fileName: saved.fileName, name: saved.name });
+      });
       if (!result.saved) throw new Error('Сохранение проекта не подтверждено.');
-      if (!useProjectStore.getState().completeProjectSave(projectToSave, context.sessionId, result.fileName, result.name)) return;
-      recordOperation('local_project_saved', { fileName: result.fileName, name: result.name });
+      if (!applied || !isProjectSession(context)) return;
       const state = useProjectStore.getState();
       const changed = captureProjectContext().signature !== state.savedProjectSignature;
       setProjectStatus(`Сохранено: ${result.fileName}${changed ? '. Более поздние изменения проекта ещё не сохранены.' : ''}`);
@@ -1821,7 +1829,10 @@ export function Toolbar({ onCsvImport, canvasWidth, canvasHeight, onHeightChange
                         <label><span>Координата Y</span><select value={importYColumn} onChange={(event) => setImportYColumn(event.target.value)}>{importPreview.columns.map((column, index) => <option key={index} value={index}>{column}</option>)}</select></label>
                         <label><span>Исходный номер</span><select value={importNumberColumn} onChange={(event) => setImportNumberColumn(event.target.value)}><option value="">Не импортировать</option>{importPreview.columns.map((column, index) => <option key={index} value={index}>{column}</option>)}</select></label>
                       </div>
-                      <label><input type="checkbox" checked={importPreview.hasHeader} onChange={e => setImportPreview({ ...importPreview, ...tableWithHeader(importPreview.allRows, e.target.checked) })} />Первая строка — заголовок</label>
+                      {importPreview.sourceKind === 'csv' && <label><span>Разделитель CSV</span><select value={importPreview.delimiter} onChange={event => changeImportDelimiter(event.target.value)}>
+                        {CSV_DELIMITERS.map(delimiter => <option key={delimiter} value={delimiter}>{delimiter === '\t' ? 'Табуляция' : delimiter}</option>)}
+                      </select></label>}
+                      <label><input type="checkbox" checked={importPreview.hasHeader} onChange={e => applyImportPreview({ ...importPreview, ...tableWithHeader(importPreview.allRows, e.target.checked) })} />Первая строка — заголовок</label>
                       <div className="csv-preview-wrap"><table className="csv-preview-table"><thead><tr>{importPreview.columns.map((column, index) => <th key={index}>{column}</th>)}</tr></thead><tbody>{importPreview.previewRows.map((row, rowIndex) => (<tr key={rowIndex}>{importPreview.columns.map((_column, colIndex) => <td key={colIndex}>{row[colIndex] ?? ''}</td>)}</tr>))}</tbody></table></div>
                     </>
                   ) : <div className="empty-message">Выбери CSV, XLSX или XLS. После выбора появится предпросмотр и выбор колонок.</div>}

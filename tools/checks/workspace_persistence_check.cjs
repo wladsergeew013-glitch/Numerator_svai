@@ -20,6 +20,17 @@ if (!process.argv[2]) {
   } finally { fs.rmSync(folder, { recursive: true, force: true }); }
 } else {
   const mode = process.argv[2], configFile = process.argv[3], loaded = new Map();
+  let hooks = [], cursor = 0;
+  const jsx = (type, props) => ({type, props:props ?? {}});
+  const react = {
+    useState(initial) {
+      const i=cursor++;
+      if (!(i in hooks)) hooks[i]=typeof initial==='function'?initial():initial;
+      return [hooks[i], next=>{hooks[i]=typeof next==='function'?next(hooks[i]):next;}];
+    },
+    useRef(initial) { const i=cursor++; return hooks[i] ?? (hooks[i]={current:initial}); },
+    useEffect() {}, useMemo:fn=>fn()
+  };
   global.window = Object.assign(new EventTarget(), {
     location: { origin: mode === 'first' ? 'http://127.0.0.1:54321' : 'http://127.0.0.1:59876' },
     localStorage: { getItem() { throw new Error('No browser cache'); }, setItem() { throw new Error('No browser cache'); } }
@@ -31,15 +42,23 @@ if (!process.argv[2]) {
     mod.paths = Module._nodeModulePaths(path.dirname(file));
     const native = mod.require.bind(mod);
     mod.require = name => {
+      if (file.endsWith('WorkspaceSettingsPanel.tsx')) {
+        if (name === 'react') return react;
+        if (name === 'react/jsx-runtime') return {jsx,jsxs:jsx};
+        if (name.endsWith('/workspacePreferences')) return {useWorkspaceTab:()=>['autosave',()=>{}]};
+        if (name.endsWith('/useProjectStore')) return {useProjectStore:()=>store.getState()};
+        if (name === './DraggablePanel') return {DraggablePanel:'panel'};
+      }
       if (name.startsWith('.')) {
         const base = path.resolve(path.dirname(file), name);
-        return load(fs.existsSync(base + '.ts') ? base + '.ts' : base + '.tsx');
+        if (fs.existsSync(base + '.ts')) return load(base + '.ts');
+        if (fs.existsSync(base + '.tsx')) return load(base + '.tsx');
       }
       return native(name);
     };
     loaded.set(file, mod);
     const source = fs.readFileSync(file, 'utf8').replaceAll('import.meta.env', '({DEV:false})');
-    mod._compile(ts.transpileModule(source, { compilerOptions: { module:ts.ModuleKind.CommonJS, target:ts.ScriptTarget.ES2022 } }).outputText, file);
+    mod._compile(ts.transpileModule(source, { compilerOptions: { module:ts.ModuleKind.CommonJS, target:ts.ScriptTarget.ES2022, jsx:ts.JsxEmit.ReactJSX } }).outputText, file);
     return mod.exports;
   }
   const { mergePatch } = load('frontend/src/utils/configPatch.ts');
@@ -112,6 +131,31 @@ if (!process.argv[2]) {
       assert.deepEqual((await client.getUserConfig()).commandIcons,{},'Acknowledged intent must not hide later backend changes');
       await client.saveUserConfig({commandIcons:{'file.save':null}});
       assert.deepEqual(client.peekUserConfig().commandIcons,{},'A removed binding never becomes a null icon URL');
+
+      holdRead=new Promise(resolve=>{finishRead=resolve;});
+      const earlier=client.getUserConfig();await tick();
+      const changed=read();changed.toolbarHeight=240;fs.writeFileSync(configFile,JSON.stringify(changed));
+      assert.equal((await client.getUserConfig()).toolbarHeight,240);
+      finishRead();assert.equal((await earlier).toolbarHeight,240,'Out-of-order GET without a local write');
+
+      const {WorkspaceSettingsPanel}=load('frontend/src/components/WorkspaceSettingsPanel.tsx');
+      const nodes = node => !node || typeof node !== 'object' ? [] : Array.isArray(node)
+        ? node.flatMap(nodes) : [node,...nodes(node.props?.children)];
+      const render = () => {cursor=0;return nodes(WorkspaceSettingsPanel({onClose(){},toolbarHeight:132,statusBarHeight:28}));};
+      const events=[];
+      window.addEventListener('pile-numbering:autosave-settings-updated',event=>events.push(event.detail));
+      const interval=render().find(node=>node.type==='input'&&node.props.type==='number');
+      interval.props.onChange({target:{value:'0.25'}});
+      render().find(node=>node.type==='input'&&node.props.type==='number').props.onBlur();
+      await tick();
+      assert.equal(read().autosaveSettings.intervalMinutes,0.25);
+      const folder=render().find(node=>node.type==='input'&&node.props.type==='text');
+      folder.props.onChange({target:{value:'alternate/autosaves'}});
+      render().find(node=>node.type==='button'&&node.props.children==='Сохранить настройки').props.onClick();
+      await tick();
+      assert.equal(read().autosaveSettings.folderPath,'alternate/autosaves');
+      assert.equal(events.at(-1).intervalMinutes,0.25);
+      assert.equal(events.at(-1).folderPath,'alternate/autosaves');
     } else {
       const state = store.getState();
       assert.equal(state.groupManagerVisible, true);
@@ -129,7 +173,9 @@ if (!process.argv[2]) {
       assert.deepEqual(state.workspace.lists['dock-order'], ['editing-panel','group-manager']);
       assert.equal(client.peekUserConfig().panels['workspace-settings'].detached, true);
       assert.equal(client.peekUserConfig().panels['group-manager'].width, 420);
-      assert.equal(client.peekUserConfig().toolbarHeight, 230);
+      assert.equal(client.peekUserConfig().toolbarHeight, 240);
+      assert.equal(config.autosaveSettings.intervalMinutes,0.25);
+      assert.equal(config.autosaveSettings.folderPath,'alternate/autosaves');
       // Opening the chosen project preserves preferences but clears action refs.
       store.setState({editPointPickMode:'copy_base',copyBasePoint:{x:1,y:2},copyBasePointId:'old'});
       store.getState().openProjectFromFile(createEmptyProject(), 'chosen.pilenum.json');

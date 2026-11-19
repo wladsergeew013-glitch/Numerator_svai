@@ -1,18 +1,11 @@
-export const MAX_IMPORT_BYTES = 16_000_000;
-export const MAX_IMPORT_ROWS = 100000;
-export const MAX_IMPORT_COLUMNS = 256;
+import { MAX_PROJECT_POINTS } from './projectLimits';
 
-export function parseCsvRecords(text: string, delimiter?: string): { rows: string[][]; delimiter: string } {
-  text = text.replace(/^\uFEFF/, '');
-  if (!delimiter) {
-    const counts = new Map([[';', 0], [',', 0], ['\t', 0]]); let quoted = false;
-    for (let i = 0; i < text.length; i++) {
-      if (text[i] === '"') { if (quoted && text[i + 1] === '"') i++; else quoted = !quoted; }
-      else if (!quoted && (text[i] === '\r' || text[i] === '\n')) break;
-      else if (!quoted && counts.has(text[i])) counts.set(text[i], counts.get(text[i])! + 1);
-    }
-    delimiter = [...counts].sort((a, b) => b[1] - a[1])[0][0];
-  }
+export const MAX_IMPORT_BYTES = 16_000_000;
+export const MAX_IMPORT_ROWS = MAX_PROJECT_POINTS;
+export const MAX_IMPORT_COLUMNS = 256;
+export const CSV_DELIMITERS = [';', ',', '\t'] as const;
+
+function readCsvRecords(text: string, delimiter: string, sampleSize = Infinity): string[][] {
   const rows: string[][] = []; let row: string[] = [], cell = '', quoted = false;
   const endCell = () => { row.push(cell); cell = ''; if (row.length > MAX_IMPORT_COLUMNS) throw new Error('Слишком много колонок.'); };
   const endRow = () => { endCell(); if (row.some(c => c.trim())) rows.push(row); row = []; if (rows.length > MAX_IMPORT_ROWS + 1) throw new Error('Превышен предел 100000 строк.'); };
@@ -23,12 +16,46 @@ export function parseCsvRecords(text: string, delimiter?: string): { rows: strin
       else if (quoted || cell === '') quoted = !quoted;
       else throw new Error('CSV: кавычки внутри неэкранированного поля.');
     } else if (!quoted && c === delimiter) endCell();
-    else if (!quoted && (c === '\r' || c === '\n')) { if (c === '\r' && text[i + 1] === '\n') i++; endRow(); }
+    else if (!quoted && (c === '\r' || c === '\n')) {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      endRow();
+      if (rows.length >= sampleSize) return rows;
+    }
     else cell += c;
     if (cell.length > 262144) throw new Error('CSV: слишком длинное поле.');
   }
   if (quoted) throw new Error('CSV: незакрытые кавычки.');
   if (cell || row.length) endRow();
+  return rows;
+}
+
+function csvDelimiterScore(rows: string[][]): number {
+  if (!rows.length || rows[0].length < 2) return -1;
+  const hasHeader = guessTableHeader(rows);
+  const isNumber = (value?: string) => {
+    const text = value?.trim().replace(/[ \u00a0\u202f]/g, '').replace(',', '.') ?? '';
+    return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text) && Number.isFinite(Number(text));
+  };
+  const numeric = rows.slice(hasHeader ? 1 : 0).filter(row => isNumber(row[0]) && isNumber(row[1])).length;
+  const consistent = rows.filter(row => row.length === rows[0].length).length;
+  return (hasHeader ? 1000 : 0) + numeric * 20 + consistent;
+}
+
+export function parseCsvRecords(text: string, delimiter?: string): { rows: string[][]; delimiter: string } {
+  text = text.replace(/^\uFEFF/, '');
+  if (!delimiter) {
+    let best = -1;
+    for (const candidate of CSV_DELIMITERS) {
+      try {
+        const score = csvDelimiterScore(readCsvRecords(text, candidate, 12));
+        if (score > best) { best = score; delimiter = candidate; }
+      } catch { /* This delimiter does not parse the sample. */ }
+    }
+  }
+  if (!delimiter || !CSV_DELIMITERS.some(candidate => candidate === delimiter)) {
+    throw new Error('CSV: не удалось определить разделитель для колонок X и Y.');
+  }
+  const rows = readCsvRecords(text, delimiter);
   if (!rows.length || rows[0].length < 2) throw new Error('Нужны минимум две колонки X и Y.');
   return { rows, delimiter };
 }

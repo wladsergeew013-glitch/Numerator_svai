@@ -1,6 +1,7 @@
 import { changedFields, mergePatch } from '../utils/configPatch';
 import { numberingSpace } from '../utils/numberingSpace';
 import { projectSaveSignature } from '../utils/projectSaveState';
+import { assertProjectCapacity, assertProjectPointLimit } from '../utils/projectLimits';
 import { validateNumbering, validateProjectPayload } from '../utils/validation';
 import { newImportPoints, reconcileCadImport, type CadImportReconciliation } from '../utils/importPoints';
 import { DEFAULT_CLUSTER_OPTIONS, type ClusterApplication } from '../types/clustering';
@@ -191,19 +192,39 @@ function pipelineStartNumber(project: PileProject, pipelineId: string | null | u
   return firstGroup?.numbering.startNumber ?? 1;
 }
 
-function nearestPointIdToAnchor(points: PilePoint[], anchor: Pick<PilePoint, 'x' | 'y'> | null | undefined) {
-  if (!anchor || points.length === 0) return null;
-  return [...points].sort((a, b) => pointDistance(a, anchor) - pointDistance(b, anchor))[0]?.id ?? null;
-}
+class ManualRouteConflict extends Error {}
 
-function buildOrderWithContinuity(points: PilePoint[], settings: NumberingSettings, previousEndPoint?: Pick<PilePoint, 'x' | 'y'> | null) {
-  const effectiveSettings = !settings.startPointId && previousEndPoint
-    ? { ...settings, startPointId: nearestPointIdToAnchor(points, previousEndPoint) }
-    : settings;
-  return {
-    settings: effectiveSettings,
-    route: buildNumberingOrder(points, effectiveSettings)
-  };
+type GroupRoute = { route: PilePoint[]; settings: NumberingSettings; error?: string };
+
+function buildOrderWithContinuity(points: PilePoint[], settings: NumberingSettings, previousEndPoint?: Pick<PilePoint, 'x' | 'y'> | null): GroupRoute {
+  try {
+    const plan = planManualLinks(points, settings);
+    let effectiveSettings = settings;
+    if (!settings.startPointId && previousEndPoint) {
+      let nearest: PilePoint | undefined;
+      let distance = Infinity;
+      for (const point of points) {
+        if (plan?.incoming.has(point.id) || (points.length > 1 && point.id === (plan?.finishHead ?? settings.endPointId))) continue;
+        const current = pointDistance(point, previousEndPoint);
+        if (!nearest || current < distance) { nearest = point; distance = current; }
+      }
+      if (nearest) effectiveSettings = { ...settings, startPointId: nearest.id };
+    }
+    const naturalRoute = buildNaturalNumberingOrder(points, effectiveSettings);
+    const route = plan ? orderManualChains(naturalRoute, plan) : naturalRoute;
+    if (plan) {
+      const index = new Map(route.map((point, i) => [point.id, i]));
+      for (const [to, from] of plan.incoming) {
+        if (!index.has(from) || index.get(to) !== index.get(from)! + 1) {
+          throw new ManualRouteConflict('Маршрут нарушает сохранённую ручную связь. Проверьте старт, финиш и связи группы.');
+        }
+      }
+    }
+    return { settings: effectiveSettings, route };
+  } catch (error) {
+    if (!(error instanceof ManualRouteConflict)) throw error;
+    return { settings, route: [], error: error.message };
+  }
 }
 
 interface EffectiveGroupNumberingContext {
@@ -238,6 +259,7 @@ function resolveEffectiveGroupNumberingContext(project: PileProject, targetGroup
 
     const continuityAnchor = previousEndPoint;
     const routePreview = buildOrderWithContinuity(groupPoints, group.numbering, continuityAnchor);
+    if (routePreview.error) throw new ManualRouteConflict(`${group.name}: ${routePreview.error}`);
     previousEndPoint = routePreview.route[routePreview.route.length - 1] ?? previousEndPoint;
 
     if (group.locked) {
@@ -257,7 +279,7 @@ function resolveEffectiveGroupNumberingContext(project: PileProject, targetGroup
   };
 }
 
-export function buildPreviewOrderForGroup(project: PileProject, targetGroup: PileGroup) {
+export function buildPreviewOrderForGroup(project: PileProject, targetGroup: PileGroup): GroupRoute {
   if (project.numberingMode !== 'global_sequential') {
     return buildOrderWithContinuity(project.points.filter(point => point.groupId === targetGroup.id), targetGroup.numbering);
   }
@@ -272,9 +294,11 @@ export function buildPreviewOrderForGroup(project: PileProject, targetGroup: Pil
       continue;
     }
 
-    const { route, settings } = buildOrderWithContinuity(groupPoints, group.numbering, previousEndPoint);
-    if (group.id === targetGroup.id) return { route, settings };
-    previousEndPoint = route[route.length - 1] ?? previousEndPoint;
+    const isTarget = group.id === targetGroup.id;
+    const result = buildOrderWithContinuity(groupPoints, isTarget ? targetGroup.numbering : group.numbering, previousEndPoint);
+    if (isTarget) return result;
+    if (result.error) return { route: [], settings: targetGroup.numbering, error: `${group.name}: ${result.error}` };
+    previousEndPoint = result.route[result.route.length - 1] ?? previousEndPoint;
   }
 
   return { route: [] as PilePoint[], settings: targetGroup.numbering };
@@ -946,104 +970,75 @@ function applyStartEndPreference(route: PilePoint[], settings: NumberingSettings
   return oriented;
 }
 
-function applyManualLinksToRoute(route: PilePoint[], links: NumberingManualLink[] | undefined, endPointId?: string | null) {
-  const validLinks = (links ?? []).filter((link) => link.fromId && link.toId && link.fromId !== link.toId);
-  if (route.length <= 1 || validLinks.length === 0) return route;
-
-  const byId = new Map(route.map((p) => [p.id, p]));
-  const naturalIndex = new Map(route.map((p, index) => [p.id, index]));
-  const fixedEndId = endPointId && byId.has(endPointId) ? endPointId : null;
-  const linkMap = new Map<string, string>();
+function planManualLinks(points: PilePoint[], settings: NumberingSettings) {
+  const links = settings.manualLinks ?? [];
+  if (!links.length) return null;
+  const byId = new Map(points.map(point => [point.id, point]));
+  const outgoing = new Map<string, string>();
   const incoming = new Map<string, string>();
-  for (const link of validLinks) {
-    if (byId.has(link.fromId) && byId.has(link.toId)) { linkMap.set(link.fromId, link.toId); incoming.set(link.toId, link.fromId); }
-  }
-  if (linkMap.size === 0) return route;
-
-  const unusedNaturalPoints = (used: Set<string>) => route.filter((p) => !used.has(p.id) && (!incoming.has(p.id) || used.has(incoming.get(p.id)!)));
-
-  const nextNaturalAfter = (pointId: string, used: Set<string>) => {
-    const index = naturalIndex.get(pointId) ?? -1;
-    for (let i = index + 1; i < route.length; i += 1) {
-      const candidate = route[i];
-      if (incoming.has(candidate.id) && !used.has(incoming.get(candidate.id)!)) continue;
-      if (fixedEndId && candidate.id === fixedEndId && unusedNaturalPoints(used).some((p) => p.id !== fixedEndId)) continue;
-      if (!used.has(candidate.id)) return candidate;
+  for (const { fromId, toId } of links) {
+    if (fromId === toId || !byId.has(fromId) || !byId.has(toId)) {
+      throw new ManualRouteConflict('Ручная связь указывает на недопустимую точку. Удалите эту связь.');
     }
-    const rest = unusedNaturalPoints(used);
-    return rest.find((p) => !fixedEndId || p.id !== fixedEndId) ?? rest[0] ?? null;
-  };
-
-  const nextNearestAfter = (point: PilePoint, used: Set<string>) => {
-    const rest = unusedNaturalPoints(used);
-    const candidates = fixedEndId && rest.some((p) => p.id !== fixedEndId)
-      ? rest.filter((p) => p.id !== fixedEndId)
-      : rest;
-    if (candidates.length === 0) return null;
-    return [...candidates].sort((a, b) => {
-      const byDistance = pointDistance(point, a) - pointDistance(point, b);
-      if (Math.abs(byDistance) > 1e-9) return byDistance;
-      return (naturalIndex.get(a.id) ?? 0) - (naturalIndex.get(b.id) ?? 0);
-    })[0] ?? null;
-  };
-
-  const result: PilePoint[] = [];
-  const used = new Set<string>();
-  let current: PilePoint | null = route[0] ?? null;
-  let guard = 0;
-  let nearestTailMode = false;
-
-  while (current && !used.has(current.id) && guard < route.length + validLinks.length + 20) {
-    guard += 1;
-    result.push(current);
-    used.add(current.id);
-
-    const manualNextId = linkMap.get(current.id);
-    if (manualNextId && byId.has(manualNextId) && !used.has(manualNextId)
-      && (manualNextId !== fixedEndId || used.size === route.length - 1)) {
-      current = byId.get(manualNextId)!;
-      nearestTailMode = true;
-      continue;
+    if (outgoing.has(fromId) || incoming.has(toId)) {
+      throw new ManualRouteConflict('В ручных связях несколько переходов из одной точки или в одну точку. Удалите лишнюю связь.');
     }
-
-    current = nearestTailMode ? nextNearestAfter(current, used) : nextNaturalAfter(current.id, used);
+    outgoing.set(fromId, toId);
+    incoming.set(toId, fromId);
   }
 
-  const rest = route.filter((p) => !used.has(p.id));
-  if (rest.length === 0) return result;
+  const chains = new Map<string, PilePoint[]>();
+  let linkedEdges = 0;
+  for (const head of points) {
+    if (incoming.has(head.id) || !outgoing.has(head.id)) continue;
+    const chain = [head];
+    for (let id = outgoing.get(head.id); id; id = outgoing.get(id)) chain.push(byId.get(id)!);
+    chains.set(head.id, chain);
+    linkedEdges += chain.length - 1;
+  }
+  if (linkedEdges !== links.length) throw new ManualRouteConflict('Ручные связи образуют замкнутый цикл. Удалите одну из связей.');
 
-  // Если ручная связь отправила маршрут в другой конец ветки, остаток лучше
-  // добирать от текущей точки ближайшим соседом, а ручной финиш держать последним.
-  // Иначе возникает баг: финиш выбран вручную, но фактический конец маршрута уезжает
-  // в последнюю точку старого авто-порядка.
-  let tail = rest;
-  if (nearestTailMode && result.length > 0) {
-    const rebuiltTail: PilePoint[] = [];
-    const tailUsed = new Set<string>();
-    let anchor = result[result.length - 1];
-    while (tailUsed.size < tail.length) {
-      const candidates = tail.filter((p) => !tailUsed.has(p.id) && (!fixedEndId || p.id !== fixedEndId || !tail.some((item) => !tailUsed.has(item.id) && item.id !== fixedEndId)));
-      if (candidates.length === 0) break;
-      const next = [...candidates].sort((a, b) => {
-        const byDistance = pointDistance(anchor, a) - pointDistance(anchor, b);
-        if (Math.abs(byDistance) > 1e-9) return byDistance;
-        return (naturalIndex.get(a.id) ?? 0) - (naturalIndex.get(b.id) ?? 0);
-      })[0];
-      rebuiltTail.push(next);
-      tailUsed.add(next.id);
-      anchor = next;
+  const endId = settings.endPointId;
+  if (endId && outgoing.has(endId)) {
+    throw new ManualRouteConflict('Из выбранного финиша выходит ручная связь. Выберите конец цепочки или удалите связь.');
+  }
+  let finishHead = endId && byId.has(endId) ? endId : null;
+  while (finishHead && incoming.has(finishHead)) finishHead = incoming.get(finishHead)!;
+  const startId = settings.startPointId;
+  if (startId && incoming.has(startId)) {
+    throw new ManualRouteConflict('В выбранный старт входит ручная связь. Выберите начало цепочки или удалите связь.');
+  }
+  if (startId && startId === finishHead && points.length > (chains.get(startId)?.length ?? 1)) {
+    throw new ManualRouteConflict('Ручная цепочка соединяет старт с финишем, оставляя другие точки вне маршрута. Измените старт, финиш или связи.');
+  }
+  return { chains, incoming, finishHead };
+}
+
+function orderManualChains(naturalRoute: PilePoint[], plan: NonNullable<ReturnType<typeof planManualLinks>>): PilePoint[] {
+  const heads = naturalRoute.filter(point => !plan.incoming.has(point.id));
+  const finish = heads.find(point => point.id === plan.finishHead);
+  const remaining = new Map(heads.filter(point => point.id !== plan.finishHead).map(point => [point.id, point]));
+  const route: PilePoint[] = [];
+  let afterManualJump = false;
+  while (remaining.size) {
+    let next = remaining.values().next().value!;
+    if (afterManualJump) {
+      const anchor = route[route.length - 1];
+      let distance = pointDistance(anchor, next);
+      for (const head of remaining.values()) {
+        const candidate = pointDistance(anchor, head);
+        if (candidate < distance - 1e-9) { next = head; distance = candidate; }
+      }
     }
-    tail = [...rebuiltTail, ...tail.filter((p) => !tailUsed.has(p.id))];
-  } else {
-    tail = [...tail].sort((a, b) => (naturalIndex.get(a.id) ?? 0) - (naturalIndex.get(b.id) ?? 0));
+    remaining.delete(next.id);
+    const chain = plan.chains.get(next.id);
+    if (chain) {
+      for (const point of chain) route.push(point);
+      afterManualJump = true;
+    } else route.push(next);
   }
-
-  if (fixedEndId) {
-    const fixedEnd = tail.find((p) => p.id === fixedEndId);
-    if (fixedEnd) tail = [...tail.filter((p) => p.id !== fixedEndId), fixedEnd];
-  }
-
-  return [...result, ...tail];
+  if (finish) for (const point of plan.chains.get(finish.id) ?? [finish]) route.push(point);
+  return route;
 }
 
 function rotatePointOrderFromStart(points: PilePoint[], startPointId: string | null | undefined) {
@@ -1425,7 +1420,7 @@ function buildVectorOrder(points: PilePoint[], settings: NumberingSettings) {
   return buildVectorNearestRoute(points, settings, scores);
 }
 
-export function buildNumberingOrder(points: PilePoint[], settings: NumberingSettings) {
+function buildNaturalNumberingOrder(points: PilePoint[], settings: NumberingSettings) {
   const method = settings.method;
   let route: PilePoint[];
   if (method === 'columns') route = buildRowsColumnsOrder(points, settings, 'columns');
@@ -1433,7 +1428,15 @@ export function buildNumberingOrder(points: PilePoint[], settings: NumberingSett
   else if (method === 'vector') route = buildVectorOrder(points, settings);
   else route = buildRowsColumnsOrder(points, settings, 'rows');
 
-  return applyManualLinksToRoute(applyStartEndPreference(route, settings), settings.manualLinks, settings.endPointId);
+  return applyStartEndPreference(route, settings);
+}
+
+export function buildNumberingOrder(points: PilePoint[], settings: NumberingSettings) {
+  return buildOrderWithContinuity(points, settings).route;
+}
+
+export function numberingRouteIssue(points: PilePoint[], settings: NumberingSettings): string | undefined {
+  return settings.manualLinks?.length ? buildOrderWithContinuity(points, settings).error : undefined;
 }
 
 function numberRouteWithNext(points: PilePoint[], route: PilePoint[], settings: NumberingSettings, reserved = new Set<number>(), clusterPrefix?: number) {
@@ -1526,7 +1529,8 @@ function applyNumberingToGroup(points: PilePoint[], group: PileGroup, startNumbe
     : typeof startNumber === 'number'
       ? { ...group.numbering, startNumber }
       : group.numbering;
-  const { route, settings } = buildOrderWithContinuity(groupPoints, baseSettings, previousEndPoint);
+  const { route, settings, error } = buildOrderWithContinuity(groupPoints, baseSettings, previousEndPoint);
+  if (error) throw new ManualRouteConflict(`${group.name}: ${error}`);
   const clusterPrefix = clusterPrefixForGroup(group);
   for (const point of route) if ((point.locked || point.manualNumber) && typeof point.number === 'number') reserved.add(point.number);
   const numbered = numberRouteWithNext(points, route, settings, reserved, cluster ? clusterPrefix : undefined);
@@ -1549,8 +1553,7 @@ export function isManualLinkTargetAllowed(project: PileProject, group: PileGroup
 
   const groupPoints = project.points.filter((p) => p.groupId === group.id);
   const linksWithoutCurrentSource = (group.numbering.manualLinks ?? []).filter((link) => link.fromId !== fromId);
-  const context = resolveEffectiveGroupNumberingContext(project, group);
-  const { route } = buildOrderWithContinuity(groupPoints, { ...group.numbering, manualLinks: linksWithoutCurrentSource }, context.previousEndPoint);
+  const { route } = buildPreviewOrderForGroup(project, { ...group, numbering: { ...group.numbering, manualLinks: linksWithoutCurrentSource } });
   const fromIndex = route.findIndex((p) => p.id === fromId);
   const toIndex = route.findIndex((p) => p.id === toId);
   if (toId === group.numbering.endPointId && fromIndex !== route.length - 2) return false;
@@ -1560,11 +1563,8 @@ export function isManualLinkTargetAllowed(project: PileProject, group: PileGroup
   // и ломает предыдущий участок нумерации.
   if (fromIndex < 0 || toIndex <= fromIndex) return false;
   const links = [...linksWithoutCurrentSource, { fromId, toId }];
-  if (new Set(links.map(link => link.toId)).size !== links.length) return false;
-  const candidate = buildOrderWithContinuity(groupPoints, { ...group.numbering, manualLinks: links }, context.previousEndPoint).route;
-  if (candidate.length !== groupPoints.length || new Set(candidate.map(point => point.id)).size !== groupPoints.length) return false;
-  const index = new Map(candidate.map((point, i) => [point.id, i]));
-  return links.every(link => index.has(link.fromId) && index.get(link.toId) === index.get(link.fromId)! + 1);
+  const candidate = buildPreviewOrderForGroup(project, { ...group, numbering: { ...group.numbering, manualLinks: links } });
+  return !candidate.error && candidate.route.length === groupPoints.length;
 }
 
 
@@ -1715,6 +1715,8 @@ interface ProjectState {
   redoStack: Snapshot[];
   journalSnapshots: Record<string, Snapshot>;
   settingsHoverTarget: string | null;
+  numberingRouteError: string | null;
+  pointEditError: string | null;
 
   pushHistory: () => void;
   recordOperation: (type: string, payload?: Record<string, unknown>) => void;
@@ -1808,7 +1810,7 @@ interface ProjectState {
   updateGroupOrder: (groupId: string, order: number) => void;
   updateGroupMeta: (groupId: string, patch: Record<string, unknown>) => void;
   toggleGroupLocked: (groupId: string) => void;
-  updateGroupNumbering: (groupId: string, patch: Partial<NumberingSettings>) => void;
+  updateGroupNumbering: (groupId: string, patch: Partial<NumberingSettings>) => boolean;
   moveGroup: (groupId: string, direction: -1 | 1) => void;
   assignSelectionToGroup: () => void;
   assignPointIdsToGroup: (ids: string[], groupId?: string | null) => void;
@@ -1857,7 +1859,7 @@ function projectSessionState(project: PileProject, state: ProjectState) {
     manualLinkClearMode: false, manualLinkClearSelection: [],
     draftOwner: null, groupOutlineDrawMode: false, groupOutlineDraft: [],
     vectorPathDrawMode: false, vectorPathEditMode: false, vectorPathDraft: [],
-    settingsHoverTarget: null
+    settingsHoverTarget: null, numberingRouteError: null, pointEditError: null
   };
 }
 
@@ -1916,6 +1918,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   redoStack: [],
   journalSnapshots: {},
   settingsHoverTarget: null,
+  numberingRouteError: null,
+  pointEditError: null,
   workspace: { windows: {}, tabs: {}, lists: {} },
   updateWorkspace: (patch) => set(state => ({ workspace: mergePatch(state.workspace, patch) as WorkspaceConfig })),
 
@@ -2044,6 +2048,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       },
       operations: []
     };
+    assertProjectCapacity(nextProject);
     set({ ...projectSessionState(nextProject, get()), savedProjectSignature: '' });
     get().recordOperation('csv_imported', { points: points.length, sourceFileName: fileName, name: projectName });
   },
@@ -2071,13 +2076,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   appendImportedPoints: (fileName, points) => {
-    points = newImportPoints(get().project.points, points);
+    const { project } = get();
+    points = newImportPoints(project.points, points);
     if (!points.length) return;
+    const nextPoints = [...project.points, ...points];
+    assertProjectCapacity({ ...project, points: nextPoints });
     get().pushHistory();
     set((state) => ({
       project: {
         ...state.project,
-        points: [...state.project.points, ...points],
+        points: nextPoints,
         project: {
           ...state.project.project,
           sourceFileName: state.project.project.sourceFileName ?? fileName,
@@ -2094,12 +2102,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const lockedGroupIds = new Set(state.project.groups.filter(group => group.locked).map(group => group.id));
     const result = reconcileCadImport(state.project.points, incoming, { overwriteNumbers, lockedGroupIds });
     if (!result.added.length && !result.moved.length && !result.linked.length && !result.renumbered.length) return result;
-    get().pushHistory();
     const changedById = new Map([...result.moved, ...result.linked, ...result.renumbered].map(point => [point.id, point]));
+    const nextPoints = [...state.project.points.map(point => changedById.get(point.id) ?? point), ...result.added];
+    assertProjectCapacity({ ...state.project, points: nextPoints });
+    get().pushHistory();
     set((state) => ({
       project: {
         ...state.project,
-        points: [...state.project.points.map(point => changedById.get(point.id) ?? point), ...result.added],
+        points: nextPoints,
         project: {
           ...state.project.project,
           sourceFileName: state.project.project.sourceFileName ?? fileName,
@@ -2130,6 +2140,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   setPoints: (points) => {
+    assertProjectCapacity({ ...get().project, points });
     get().pushHistory();
     set((state) => ({ project: withSanitizedNumberingRefs({ ...state.project, points }), selectedPointIds: [] }));
     get().recordOperation('csv_imported', { points: points.length });
@@ -2298,6 +2309,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   })),
 
   openEditingTool: (tool) => set((state) => ({
+    pointEditError: null,
     editingPanelVisible: true,
     editingTool: tool,
     pointInfoVisible: tool === 'create' || tool === 'move' || tool === 'copy' || tool === 'props' ? false : state.pointInfoVisible,
@@ -2309,6 +2321,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   })),
 
   closeEditingPanel: () => set({
+    pointEditError: null,
     editingPanelVisible: false,
     editingTool: null,
     editPointPickMode: null,
@@ -2384,12 +2397,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       syncState: 'added',
       meta: { createdBy: 'manual' }
     };
-
+    const nextPoints = [...project.points, point];
+    try { assertProjectCapacity({ ...project, points: nextPoints }); }
+    catch (error) { set({ pointEditError: String((error as Error).message) }); return; }
     get().pushHistory();
     set((state) => ({
+      pointEditError: null,
       project: {
         ...state.project,
-        points: [...state.project.points, point],
+        points: nextPoints,
         project: { ...state.project.project, updatedAt: new Date().toISOString() }
       },
       selectedPointIds: [point.id],
@@ -2465,6 +2481,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const idsSet = new Set(sourceSelectedIds);
     const sourcePoints = project.points.filter((p) => idsSet.has(p.id));
     if (sourcePoints.length === 0) return;
+    try { assertProjectPointLimit(project.points.length + sourcePoints.length); }
+    catch (error) { set({ pointEditError: String((error as Error).message) }); return; }
 
     const copiedPoints: PilePoint[] = sourcePoints.map((p) => ({
       ...p,
@@ -2481,11 +2499,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       meta: { ...(p.meta ?? {}), cadHandle: undefined, cadDocument: undefined, copiedFrom: p.id }
     }));
 
+    const nextPoints = [...project.points, ...copiedPoints];
+    try { assertProjectCapacity({ ...project, points: nextPoints }); }
+    catch (error) { set({ pointEditError: String((error as Error).message) }); return; }
     get().pushHistory();
     set((state) => ({
+      pointEditError: null,
       project: {
         ...state.project,
-        points: [...state.project.points, ...copiedPoints],
+        points: nextPoints,
         project: { ...state.project.project, updatedAt: new Date().toISOString() }
       },
       selectedPointIds: keepSourceSelection ? sourceSelectedIds : copiedPoints.map((p) => p.id),
@@ -2557,13 +2579,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return;
     }
 
-    const { route } = buildPreviewOrderForGroup(project, group);
+    const { route, error } = buildPreviewOrderForGroup(project, group);
     if (route.length === 0) {
-      set({ numberingPreview: EMPTY_NUMBERING_PREVIEW });
+      set({ numberingPreview: EMPTY_NUMBERING_PREVIEW, numberingRouteError: error ?? null });
       return;
     }
 
     set({
+      numberingRouteError: null,
       selectedGroupId: group.id,
       selectedPipelineId: groupPipelineId(group, project),
       numberingPreview: {
@@ -2588,7 +2611,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   clearNumberingPreview: () => set({ numberingPreview: EMPTY_NUMBERING_PREVIEW }),
 
-  cancelNumberingPreview: () => set({ allGroupsOrderVisible: false, numberingPreview: EMPTY_NUMBERING_PREVIEW, numberingPickMode: null, numberingLinkFromId: null, numberingLinkToId: null, manualLinkClearMode: false, manualLinkClearSelection: [] }),
+  cancelNumberingPreview: () => set({ allGroupsOrderVisible: false, numberingPreview: EMPTY_NUMBERING_PREVIEW, numberingRouteError: null, numberingPickMode: null, numberingLinkFromId: null, numberingLinkToId: null, manualLinkClearMode: false, manualLinkClearSelection: [] }),
 
   cancelNumberingLinkSelection: () => {
     const { numberingPickMode, numberingLinkFromId, numberingLinkToId, manualLinkClearMode } = get();
@@ -2605,6 +2628,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   setNumberingPickMode: (mode) => set({
+    numberingRouteError: null,
     numberingPickMode: mode,
     numberingLinkFromId: null,
     numberingLinkToId: null,
@@ -2637,8 +2661,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         ...existingLinks.filter((link) => link.fromId !== numberingLinkFromId && link.toId !== point.id),
         { fromId: numberingLinkFromId, toId: point.id }
       ];
-      get().pushHistory();
-      get().updateGroupNumbering(groupId, { manualLinks });
+      if (!get().updateGroupNumbering(groupId, { manualLinks })) return;
       set({
         selectedPointIds: [numberingLinkFromId, point.id],
         selectedGroupId: groupId,
@@ -2669,7 +2692,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const group = groupId ? project.groups.find((g) => g.id === groupId) : null;
     if (!groupId || point.groupId !== groupId || group?.locked) return;
     const patch = numberingPickMode === 'group_start' ? { startPointId: pointId } : { endPointId: pointId };
-    get().updateGroupNumbering(groupId, patch);
+    if (!get().updateGroupNumbering(groupId, patch)) return;
     set({ selectedPointIds: [pointId], selectedGroupId: groupId, numberingPickMode: null, numberingLinkFromId: null, numberingLinkToId: null });
     get().buildNumberingPreview();
   },
@@ -2782,7 +2805,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     const removeSet = new Set(removeKeys);
     const existing = group.numbering.manualLinks ?? [];
-    get().pushHistory();
     get().updateGroupNumbering(group.id, { manualLinks: existing.filter((link) => !removeSet.has(manualLinkKey(link))) });
     set({ manualLinkClearMode: false, manualLinkClearSelection: [], numberingPickMode: null, numberingLinkFromId: null, numberingLinkToId: null });
     get().recordOperation('numbering_manual_links_cleared', { groupId: group.id, groupName: group.name, removed: removeKeys.length, selectedOnly: manualLinkClearMode });
@@ -3078,7 +3100,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return true;
     }
 
-    get().pushHistory();
     get().updateGroupNumbering(group.id, { manualLinks: existing.filter((item) => !(item.fromId === link.fromId && item.toId === link.toId)) });
     set({ selectedPointIds: [link.fromId], selectedGroupId: group.id, numberingPickMode: null, numberingLinkFromId: null, numberingLinkToId: null });
     get().recordOperation('numbering_manual_link_deleted', { groupId: group.id, groupName: group.name, fromId: link.fromId, toId: link.toId });
@@ -3150,6 +3171,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   updateGroupMeta: (groupId, patch) => {
     if (patch.clusterPrefix !== undefined && (!Number.isSafeInteger(patch.clusterPrefix) || Number(patch.clusterPrefix) <= 0)) throw new Error('Индекс кластера должен быть положительным безопасным целым.');
+    const group = get().project.groups.find(item => item.id === groupId);
+    if (!group || !Object.entries(patch).some(([key, value]) => JSON.stringify(value) !== JSON.stringify(group.meta?.[key]))) return;
+    get().pushHistory();
     set((state) => ({
       project: {
         ...state.project,
@@ -3174,16 +3198,29 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   updateGroupNumbering: (groupId, patch) => {
-    const group = get().project.groups.find((g) => g.id === groupId);
-    if (!group || group.locked) return;
-    validateNumbering({ ...group.numbering, ...patch });
+    const { project } = get();
+    const group = project.groups.find((g) => g.id === groupId);
+    if (!group || group.locked) return false;
+    const numbering = { ...group.numbering, ...patch };
+    validateNumbering(numbering);
+    if (JSON.stringify(numbering) === JSON.stringify(group.numbering)) return true;
+    const previousLinks = new Set((group.numbering.manualLinks ?? []).map(manualLinkKey));
+    const onlyRemovesLinks = patch.manualLinks && patch.manualLinks.length < (group.numbering.manualLinks?.length ?? 0)
+      && patch.manualLinks.every(link => previousLinks.has(manualLinkKey(link)));
+    if (patch.startPointId || patch.endPointId || (patch.manualLinks && !onlyRemovesLinks)) {
+      const issue = numberingRouteIssue(project.points.filter(point => point.groupId === groupId), numbering);
+      if (issue) { set({ numberingRouteError: issue }); return false; }
+    }
+    get().pushHistory();
     set((state) => ({
+      numberingRouteError: null,
       project: {
         ...state.project,
-        groups: state.project.groups.map((g) => (g.id === groupId ? { ...g, numbering: { ...g.numbering, ...patch } } : g))
+        groups: state.project.groups.map((g) => (g.id === groupId ? { ...g, numbering } : g))
       }
     }));
     if (get().numberingPreview.visible && get().numberingPreview.groupId === groupId) get().buildNumberingPreview();
+    return true;
   },
 
   moveGroup: (groupId, direction) => {
@@ -3589,6 +3626,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
         const continuityAnchor = project.numberingMode === 'global_sequential' ? previousEndPoint : null;
         const routePreview = buildOrderWithContinuity(groupPoints, group.numbering, continuityAnchor);
+        if (routePreview.error) throw new ManualRouteConflict(`${group.name}: ${routePreview.error}`);
         previousEndPoint = routePreview.route[routePreview.route.length - 1] ?? previousEndPoint;
 
         if (group.locked) {

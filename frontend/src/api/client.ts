@@ -2,6 +2,7 @@ import { LocalProjectInfo, RecentProjectInfo, NumberingSettings, PileGroup, Pile
 import { queueProjectSave } from '../utils/projectSaves';
 import type { ClusterOptions, ClusterPreview } from '../types/clustering';
 import { mergePatch } from '../utils/configPatch';
+import { assertProjectJsonSize } from '../utils/projectLimits';
 
 // The packaged desktop UI is served by its own backend on a free port.
 // Keep the fixed development port only for Vite; production requests are same-origin.
@@ -113,13 +114,20 @@ export async function listLocalProjects(): Promise<LocalProjectInfo[]> {
   return data.projects;
 }
 
-export async function saveLocalProject(project: PileProject): Promise<{ saved: boolean; fileName: string; name: string }> {
+type LocalProjectSaveResult = { saved: boolean; fileName: string; name: string };
+
+export async function saveLocalProject(project: PileProject, onSaved?: (result: LocalProjectSaveResult) => void): Promise<LocalProjectSaveResult> {
   const snapshot = JSON.stringify(project);
-  return queueProjectSave(project.project.id, () => request<{ saved: boolean; fileName: string; name: string }>('/api/projects/local/save', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: snapshot
-  }));
+  assertProjectJsonSize(snapshot);
+  return queueProjectSave(project.project.id, async () => {
+    const result = await request<LocalProjectSaveResult>('/api/projects/local/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: snapshot
+    });
+    if (result.saved) onSaved?.(result);
+    return result;
+  });
 }
 
 export async function openLocalProject(fileName: string): Promise<PileProject> {
@@ -215,13 +223,19 @@ export interface UserConfigPayload {
 
 let cachedUserConfig: UserConfigPayload = {};
 let configRevision = 0;
+let configReadSequence = 0;
+let acceptedConfigRead = 0;
 export function peekUserConfig(): UserConfigPayload { return cachedUserConfig; }
 
 export async function getUserConfig(): Promise<UserConfigPayload> {
+  const read = ++configReadSequence;
   const revision = configRevision;
   const config = await request<UserConfigPayload>('/api/config/user');
   // A late GET must not undo changes made while it was in flight.
-  if (revision === configRevision) cachedUserConfig = applyConfigPatch(applyConfigPatch(config, inFlightConfig), pendingConfig);
+  if (revision === configRevision && read > acceptedConfigRead) {
+    acceptedConfigRead = read;
+    cachedUserConfig = applyConfigPatch(applyConfigPatch(config, inFlightConfig), pendingConfig);
+  }
   return cachedUserConfig;
 }
 
@@ -275,6 +289,9 @@ export async function flushUserConfig(): Promise<UserConfigPayload> {
         });
         configRevision++;
         cachedUserConfig = applyConfigPatch(saved, pendingConfig);
+        if (patch.autosaveSettings && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('pile-numbering:autosave-settings-updated', { detail: saved.autosaveSettings }));
+        }
       } catch (error) {
         // Keep failed changes for a retry; newer edits win over the old batch.
         pendingConfig = mergePatch(patch, pendingConfig);
@@ -295,10 +312,12 @@ export function saveUserConfig(config: UserConfigPatchPayload): Promise<UserConf
 }
 
 export async function autosaveProject(project: PileProject, folderPath?: string | null): Promise<{ saved: boolean; fileName: string; path: string }> {
+  const snapshot = JSON.stringify(project);
+  assertProjectJsonSize(snapshot);
   return request<{ saved: boolean; fileName: string; path: string }>('/api/autosave/project', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project, folderPath: folderPath || null })
+    body: `{"project":${snapshot},"folderPath":${JSON.stringify(folderPath || null)}}`
   });
 }
 
@@ -398,6 +417,7 @@ export interface CadProgress {
   documentName?: string;
   cancelRequested?: boolean;
   canOpenNanoCadSettings?: boolean;
+  scanCachesInvalidated?: boolean;
   completed: number;
   total: number | null;
   startedAt?: number;
@@ -447,11 +467,14 @@ async function cadRequest<T>(kind: string, payload: unknown = {}): Promise<T> {
   } }));
   let last: CadProgress = { status: 'running', phase: 'Подключение к nanoCAD', completed: 0, total: null, startedAt: Date.now() / 1000 };
   publish(last);
+  let invalidateScans = false;
   try {
     const job = await request<{ id: string }>('/api/nanocad/operations', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, payload })
     });
     activeCadJobId = job.id;
+    // If polling fails, a submitted export could already have written to CAD.
+    invalidateScans = kind === 'blocks/export' || kind === 'modelstudio/export';
     last = { ...last, id: job.id };
     publish(last);
     if (cadCancelRequested) {
@@ -479,9 +502,13 @@ async function cadRequest<T>(kind: string, payload: unknown = {}): Promise<T> {
       }
       last = state;
       publish(state);
+      if (state.status !== 'running') invalidateScans = state.scanCachesInvalidated === true;
       if (state.status === 'cancelled') throw new CadOperationCancelled(typeof state.error === 'string' ? state.error : 'Операция остановлена пользователем.');
       if (state.status === 'failed') throw apiError(503, JSON.stringify({ detail: state.error }));
-      if (state.status === 'completed') return state.result as T;
+      if (state.status === 'completed') {
+        if (state.result === undefined) throw new Error('Результат завершённой операции CAD недоступен. Проверьте журнал перед повтором.');
+        return state.result;
+      }
     }
   } catch (error) {
     clientLog.push(`${new Date().toISOString()} ${String(error)}`);
@@ -491,6 +518,7 @@ async function cadRequest<T>(kind: string, payload: unknown = {}): Promise<T> {
     cadBusy = false;
     activeCadJobId = null;
     cadCancelRequested = false;
+    if (invalidateScans) window.dispatchEvent(new Event('pile-numbering:cad-changed'));
   }
 }
 
@@ -528,6 +556,7 @@ export interface NanoCadBlockExportResult {
   unmatchedBlocks?: Array<{ x: number; y: number }>;
   unmatchedObjects?: Array<{ objectName?: string; x: number; y: number }>;
   skippedNoCoordinates?: number;
+  skippedObjectTypes?: number;
   failedWrites?: number;
   unresolvedHandles?: number;
   logFile?: string;
