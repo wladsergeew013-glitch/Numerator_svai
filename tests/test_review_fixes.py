@@ -299,7 +299,7 @@ class ReviewBackendTests(unittest.TestCase):
         self.assertEqual(result['status'],'failed'); self.assertEqual(result['updated'],1); self.assertEqual(write.call_count,2)
         self.assertNotIn(scan['scanId'],api._MODELSTUDIO_SCAN_CACHE)
         self.assertTrue(cad.shutdown(self.root/'cad-shutdown.json',.2))
-        self.assertEqual(json.loads((self.root/'cad-shutdown.json').read_text())['operations'][-1]['updated'],1)
+        self.assertEqual(json.loads((self.root/'cad-shutdown.json').read_text(encoding='utf-8'))['operations'][-1]['updated'],1)
         with self.assertRaises(HTTPException): cad.start('scan',lambda:None)
 
     def test_PN034_same_path_other_database_and_legacy_binding(self):
