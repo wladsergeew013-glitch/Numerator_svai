@@ -1,4 +1,5 @@
 import { createEmptyProject, defaultNumberingSettings, DIRECTION_LABELS, type PileProject, type NumberingSettings } from '../types/project';
+import { assertProjectCapacity } from './projectLimits';
 
 export function parseSafeInteger(text: string): number {
   if (!/^[+-]?\d+$/.test(text.trim())) throw new Error('Введите непустое целое число.');
@@ -59,7 +60,7 @@ export function validateProjectPayload(payload: unknown): asserts payload is Pil
   for (const key of ['fileName', 'sourceFileName']) if (info[key] != null && typeof info[key] !== 'string') throw new Error(`project.${key}: ожидается строка.`);
   const arrays = ['points', 'groups', 'pipelines', 'operations'];
   for (const key of arrays) if (p[key] !== undefined && !Array.isArray(p[key])) throw new Error(`${key}: ожидается массив.`);
-  if ((p.points?.length ?? 0) > 100000) throw new Error('Превышен предел 100000 точек.');
+  assertProjectCapacity(p);
   const ids = (list: any[], label: string) => {
     const result = new Set<string>();
     for (const item of list) {

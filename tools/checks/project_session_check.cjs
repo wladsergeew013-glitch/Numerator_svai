@@ -35,7 +35,8 @@ function load(relative) {
     return native(name);
   };
   cache.set(file,mod);
-  mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX}}).outputText,file);
+  const source=fs.readFileSync(file,'utf8').replaceAll('import.meta.env','({DEV:false})');
+  mod._compile(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX}}).outputText,file);
   return mod.exports;
 }
 global.window=Object.assign(new EventTarget(),{localStorage:{getItem:()=>null,setItem(){}},requestAnimationFrame:()=>0,cancelAnimationFrame(){}});
@@ -98,7 +99,7 @@ function text(node){if(typeof node==='string')return node;if(Array.isArray(node)
     open(a);const response=defer();let statuses=[];
     const save=handler(toolbar,'saveProjectToLocalFolder',{
       ...session,useProjectStore:store,project:store.getState().project,
-      needsSaveNamePrompt:()=>false,saveLocalProject:()=>response.promise,
+      needsSaveNamePrompt:()=>false,saveLocalProject:async(_,ack)=>{const result=await response.promise;ack(result);return result;},
       recordOperation:(...args)=>store.getState().recordOperation(...args),
       refreshLocalProjects:async()=>{},setProjectStatus:value=>statuses.push(value),
     });
@@ -148,7 +149,7 @@ function text(node){if(typeof node==='string')return node;if(Array.isArray(node)
   function click(label){const matches=nodes(render()).filter(n=>n.type==='button'&&text(n)===label);assert.equal(matches.length,1);return matches[0].props.onClick();}
   for(const decision of ['Отмена','Не сохранять','Сохранить']){
     open(a);store.getState().setPoints([point('A',5)]);let savedProject;
-    api.saveLocalProject=async p=>{savedProject=p;return{saved:true,fileName:'A.json',name:'A'};};
+    api.saveLocalProject=async (p,ack)=>{savedProject=p;const result={saved:true,fileName:'A.json',name:'A'};ack(result);return result;};
     const changing=session.openProjectSafely(async()=>({project:b,fileName:'B.json'}));await tick();
     assert.match(text(render()),/Сохранить изменения перед сменой проекта/);
     await click(decision);assert.equal(await changing,decision!=='Отмена');
@@ -161,6 +162,56 @@ function text(node){if(typeof node==='string')return node;if(Array.isArray(node)
   await click('Сохранить');assert.match(text(render()),/disk full/);
   await click('Отмена');assert.equal(await failed,false);assert.equal(store.getState().project.points[0].x,11);
   cleanup.forEach(fn=>fn?.());
+
+  const client=load('frontend/src/api/client.ts');
+  const closeRequested=()=>window.dispatchEvent(new Event('pile-numbering:close-requested'));
+  const mountCloseGuard=()=>{hooks=[];effects=[];cursor=0;CloseProjectGuard();return effects.map(effect=>effect());};
+  for(const initiallyClean of [false,true]) {
+    open(a);store.getState().setPoints([point('A',1)]);
+    const activeSave=defer(), writes=[];
+    let closed=false, nativeSaveStarted=false;
+    global.fetch=async (url,init)=>{
+      if(url==='/api/session') return {ok:true,json:async()=>({token:'fixture-token'})};
+      assert.equal(url,'/api/projects/local/save');
+      const snapshot=JSON.parse(init.body);
+      await activeSave.promise;
+      writes.push(snapshot.points[0].x);
+      return {ok:true,json:async()=>({saved:true,fileName:'A.json',name:'A'})};
+    };
+    const snapshot=store.getState().project, sid=store.getState().projectSessionId;
+    const saving=client.saveLocalProject(snapshot, result=>store.getState().completeProjectSave(snapshot,sid,result.fileName,result.name));
+    await tick();
+    if(initiallyClean) store.getState().undo(); else store.getState().setPoints([point('A',7)]);
+    assert.equal(dirty(),!initiallyClean);
+    window.pywebview={api:{
+      saveProjectJson:async(_name,data)=>{nativeSaveStarted=true;writes.push(JSON.parse(data).points[0].x);return {saved:true};},
+      closeConfirmed:async()=>{assert.equal(dirty(),false);closed=true;}
+    }};
+    const unmount=mountCloseGuard();
+    closeRequested();await tick();
+    if(!initiallyClean) void click('Сохранить');
+    await tick();assert.equal(nativeSaveStarted,false);assert.equal(closed,false);
+    activeSave.resolve();await saving;await tick();
+    if(initiallyClean) {
+      assert.deepEqual(writes,[1]);assert.equal(closed,false);assert.ok(dirty());
+      assert.match(text(render()),/Проект изменился во время закрытия/);
+    } else {
+      assert.deepEqual(writes,[1,7]);assert.equal(closed,true);
+    }
+    unmount.forEach(fn=>fn?.());
+  }
+  open(a);
+  let canceledPreparation=0;
+  const preparing=defer();
+  window.pywebview={api:{prepareClose:()=>preparing.promise,cancelClose:async()=>{canceledPreparation++;},
+    closeConfirmed:async()=>{assert.fail('A newly edited project cannot close after CAD preparation');}}};
+  const unmount=mountCloseGuard();
+  closeRequested();await tick();store.getState().setPoints([point('A',17)]);preparing.resolve();await tick();
+  assert.equal(canceledPreparation,1);
+  assert.match(text(render()),/Проект изменился во время закрытия/);
+  unmount.forEach(fn=>fn?.());delete window.pywebview;
+  console.log('PASS R01: delayed HTTP write, native save and receipt run in order; clean/dirty state rechecked after waiting.');
+
   open(a);const input={value:'selected',files:[{name:'B.json',text:async()=>JSON.stringify(b)}]};
   let ready=0;
   const browserOpen=handler('frontend/src/components/StartupScreen.tsx','openBrowserFile',{

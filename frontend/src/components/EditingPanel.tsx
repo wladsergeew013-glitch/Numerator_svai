@@ -77,6 +77,7 @@ export function EditingPanel({ toolbarHeight, statusBarHeight }: Props) {
     selectedPointIds,
     selectedGroupId,
     editingTool,
+    pointEditError,
     editPointPickMode,
     copyBasePoint,
     copyBasePointId,
@@ -132,6 +133,7 @@ export function EditingPanel({ toolbarHeight, statusBarHeight }: Props) {
       onClose={closeEditingPanel}
     >
       <div className="editing-panel">
+        {pointEditError && <div role="alert" className="settings-help">{pointEditError}</div>}
         {editingTool === 'create' && (
           <div className="edit-command-card">
             <div className="edit-card-title">Новая точка по координатам</div>

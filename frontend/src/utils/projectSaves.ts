@@ -2,6 +2,18 @@
 // shared by HTTP saves, transition saves and native JSON exports.
 const pending = new Map<string, Promise<unknown>>();
 
+export function hasPendingProjectSaves(projectId: string): boolean {
+  return pending.has(projectId);
+}
+
+export async function waitForProjectSaves(projectId: string): Promise<void> {
+  let tail = pending.get(projectId);
+  while (tail) {
+    await tail;
+    tail = pending.get(projectId);
+  }
+}
+
 export function queueProjectSave<T>(projectId: string, write: () => Promise<T>): Promise<T> {
   const operation = (pending.get(projectId) ?? Promise.resolve()).then(write);
   const tail = operation.then(() => undefined, () => undefined);

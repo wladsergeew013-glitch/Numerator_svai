@@ -133,18 +133,30 @@ def apply_numbering_rows(request: NumberingRowsRequest) -> list[PilePoint]:
         group = by_group.get(point.groupId)
         return point.groupId if request.numberingMode == 'per_group' else (_pipeline_id(group) if group else 'ungrouped')
     occupied = {}
+    target_occupied = set()
     for point in points:
         group = by_group.get(point.groupId)
-        if request.groupId and target and namespace(point) != (target.id if request.numberingMode == 'per_group' else _pipeline_id(target)): continue
-        if point.number is None or not (point.locked or point.manualNumber or (group and group.locked) or (request.groupId and point.groupId != request.groupId)):
+        space = namespace(point)
+        if target and space != (target.id if request.numberingMode == 'per_group' else _pipeline_id(target)):
             continue
-        reserve = occupied.setdefault(namespace(point), set())
-        if point.number in reserve:
-            raise ValueError('Conflicting fixed numbers in the same namespace')
-        reserve.add(point.number)
+        if point.number is None:
+            continue
+        fixed = point.locked or point.manualNumber or (group is not None and group.locked)
+        if fixed:
+            reserve = occupied.setdefault(space, set())
+            if point.number in reserve:
+                raise ValueError('Conflicting fixed numbers in the same namespace')
+            reserve.add(point.number)
+        if target and (fixed or point.groupId != target.id):
+            if point.number in target_occupied:
+                raise ValueError('Conflicting fixed numbers in the same namespace')
+            target_occupied.add(point.number)
     if target:
-        pipeline_groups = [g for g in groups if _pipeline_id(g) == _pipeline_id(target)]
-        groups = pipeline_groups[:pipeline_groups.index(target)+1]
+        if request.numberingMode == 'per_group':
+            groups = [target]
+        else:
+            pipeline_groups = [g for g in groups if _pipeline_id(g) == _pipeline_id(target)]
+            groups = pipeline_groups[:pipeline_groups.index(target)+1]
     starts = {}
     for group in groups:
         key = _pipeline_id(group)
@@ -156,7 +168,10 @@ def apply_numbering_rows(request: NumberingRowsRequest) -> list[PilePoint]:
             continue
         settings = group.numbering.model_copy(update={'startNumber': current}) if request.numberingMode == 'global_sequential' else group.numbering
         reserve_key = group.id if request.numberingMode == 'per_group' else key
-        starts[key] = number_route(build_rows_order(members, settings), settings, occupied.setdefault(reserve_key, set()))
+        # Prior groups use the same virtual reservations as full numbering.
+        # Only the target must avoid the actual numbers in untouched groups.
+        reserve = target_occupied if target and group.id == target.id else occupied.setdefault(reserve_key, set())
+        starts[key] = number_route(build_rows_order(members, settings), settings, reserve)
     ungrouped = [p for p in points if not p.groupId or p.groupId not in by_group]
     if ungrouped and not request.groupId:
         settings = request.settings.model_copy(update={'startNumber': max(starts.values(), default=request.settings.startNumber)})

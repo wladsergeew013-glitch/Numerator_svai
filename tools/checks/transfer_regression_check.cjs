@@ -25,7 +25,7 @@ function load(file) {
   mod._compile(code, file);
   return mod.exports;
 }
-const { useProjectStore: store, connectedAutoClusters, buildNumberingOrder, buildGroupFlow, suggestedAxisTolerance } = load(path.join(root, 'frontend/src/store/useProjectStore.ts'));
+const { useProjectStore: store, connectedAutoClusters, buildNumberingOrder, buildGroupFlow, numberingRouteIssue, suggestedAxisTolerance } = load(path.join(root, 'frontend/src/store/useProjectStore.ts'));
 const { newImportPoints, reconcileCadImport } = load(path.join(root, 'frontend/src/utils/importPoints.ts'));
 const { createEmptyProject, defaultNumberingSettings } = load(path.join(root, 'frontend/src/types/project.ts'));
 const { cadAxisPlacement } = load(path.join(root, 'frontend/src/utils/cadAxes.ts'));
@@ -357,8 +357,12 @@ async function checkPinnedNumbering() {
     const p=createEmptyProject();p.groups=[group('g',1,p.pipelines[0].id)];
     p.groups[0].numbering={...p.groups[0].numbering,method,startPointId:'a',endPointId:'d',manualLinks:[{fromId:'a',toId:'d'}]};
     p.points=['a','b','c','d'].map((id,i)=>point(id,i*10,0,{groupId:'g'}));
+    assert.deepEqual(buildNumberingOrder(p.points,p.groups[0].numbering),[],'Conflicting pinned endpoints must not silently discard the edge');
+    assert.match(numberingRouteIssue(p.points,p.groups[0].numbering),/ручная цепочка/i);
+    p.groups[0].numbering.manualLinks=[{fromId:'c',toId:'d'}];
     const route=buildNumberingOrder(p.points,p.groups[0].numbering);
     assert.equal(route.at(-1).id,'d');assert.equal(new Set(route.map(p=>p.id)).size,4);
+    assert.equal(route.at(-2).id,'c');
     p.groups[0].numbering.manualLinks=[];prepare(p);
     store.getState().startNumberingManualLinkEdit('a','b');store.getState().handleNumberingPickPoint('d');
     assert.deepEqual(store.getState().project.groups[0].numbering.manualLinks,[],'reject a premature edge to the pinned finish');
@@ -373,6 +377,83 @@ async function checkPinnedNumbering() {
   prepare(continuity);store.getState().setSelectedGroup('b');
   store.getState().startNumberingManualLinkEdit('b1','b2');store.getState().handleNumberingPickPoint('b2');
   assert.deepEqual(store.getState().project.groups[1].numbering.manualLinks,[],'link validation uses the same continuity as preview');
+
+  const linked=createEmptyProject();
+  linked.groups=[group('prior',1,linked.pipelines[0].id),group('linked',2,linked.pipelines[0].id)];
+  linked.points=[point('prior-1',0,0,{groupId:'prior'}), ...['a','b','c','d'].map((id,i)=>point(id,i*10,0,{groupId:'linked'}))];
+  linked.groups[1].numbering={...linked.groups[1].numbering, rowTolerance:1, columnTolerance:1,
+    direction:'left_to_right_top_to_bottom', manualLinks:[{fromId:'a',toId:'c'}]};
+  prepare(linked);store.getState().setSelectedGroup('linked');
+  const linkedRoute=()=>{
+    const {project}=store.getState();return buildPreviewOrderForGroup(project,project.groups.find(group=>group.id==='linked')).route.map(point=>point.id);
+  };
+  assert.deepEqual(linkedRoute(),['a','c','b','d']);
+  store.getState().setPoints(store.getState().project.points.map(point=>point.id==='prior-1'?{...point,x:20}:point));
+  const preservesEdge=route=>assert.equal(route.indexOf('c'),route.indexOf('a')+1);
+  for(const method of ['rows','columns','route','vector']) {
+    const state=store.getState();
+    assert.equal(state.updateGroupNumbering('linked',{method, direction:'right_to_left_top_to_bottom'}),true);
+    const route=linkedRoute();assert.equal(route.length,4);preservesEdge(route);
+    assert.equal(state.updateGroupNumbering('linked',{startPointId:'c'}),false);
+    assert.equal(state.updateGroupNumbering('linked',{endPointId:'a'}),false);
+    assert.deepEqual(linkedRoute(),route);
+    await state.applyRowsNumbering();
+    const points=store.getState().project.points;
+    assert.equal(points.find(point=>point.id==='c').number,points.find(point=>point.id==='a').number+1);
+  }
+  const legacyConflict=structuredClone(linked);
+  legacyConflict.groups[1].numbering.startPointId='c';prepare(legacyConflict);store.getState().setSelectedGroup('linked');
+  const rejected=store.getState().project;
+  await assert.rejects(store.getState().applyRowsNumbering(),/входит ручная связь/);
+  assert.equal(store.getState().project,rejected);
+  console.log('PASS R05: continuity and all four methods preserve manual edges; incompatible endpoints reject atomically.');
+
+  for(const edit of ['numbering','cluster']) {
+    prepare(linked);store.getState().updateGroupColor('linked','#123456');store.getState().undo();
+    assert.equal(store.getState().redoStack.length,1);
+    if(edit==='numbering') store.getState().updateGroupNumbering('linked',{startNumber:100});
+    else store.getState().updateGroupMeta('linked',{clusterPrefix:13});
+    store.getState().redo();
+    const updated=store.getState().project.groups[1];
+    assert.equal(edit==='numbering'?updated.numbering.startNumber:updated.meta.clusterPrefix,edit==='numbering'?100:13);
+    assert.equal(store.getState().history.length,1,'A user edit creates one undo snapshot');
+    store.getState().undo();
+    assert.equal(store.getState().project.groups[1].numbering.startNumber,linked.groups[1].numbering.startNumber);
+    assert.equal(store.getState().project.groups[1].meta.clusterPrefix,undefined);
+  }
+  console.log('PASS R06: start number and cluster metadata survive stale Redo and remain undoable.');
+
+  const large=createEmptyProject();
+  large.points=Array.from({length:99999},(_,i)=>point('limit'+i,i,0));
+  prepare(large);
+  store.getState().appendImportedPoints('max.csv',[point('last',100000,1)]);
+  assert.equal(store.getState().project.points.length,100000);
+  store.getState().openProjectFromFile(JSON.parse(JSON.stringify(store.getState().project)), 'max.pilenum.json');
+  const full=store.getState();
+  assert.throws(()=>full.appendImportedPoints('overflow.csv',[point('extra',100001,2)]),/100 000/);
+  assert.throws(()=>full.syncCadImportedPoints('cad', [point('cad-new',100002,2)]),/100 000/);
+  assert.throws(()=>full.startNewProjectFromImport('overflow.csv', [...full.project.points,point('extra',100001,2)]),/100 000/);
+  assert.throws(()=>full.setPoints([...full.project.points,point('extra',100001,2)]),/100 000/);
+  full.createPointAt(100003,2);
+  assert.match(store.getState().pointEditError,/100 000/);
+  full.setSelection(['limit1']);full.copySelectedPoints(1,0);
+  assert.match(store.getState().pointEditError,/100 000/);
+  assert.equal(store.getState().project,full.project);
+  assert.equal(store.getState().history,full.history);
+  full.appendImportedPoints('duplicate.csv',[{...full.project.points[1]}]);
+  assert.equal(store.getState().project,full.project,'Deduplication happens before capacity validation');
+  console.log('PASS R07: exact-limit project reopens, every admission path rejects point 100001 before changing project/history.');
+
+  const {parseCsvRecords,tableWithHeader,guessTableHeader}=load(path.join(root,'frontend/src/utils/tabularImport.ts'));
+  const decimals=parseCsvRecords('\r\n1,25;2,50\r\n3,75;4,10');
+  assert.equal(decimals.delimiter,';');assert.deepEqual(decimals.rows,[['1,25','2,50'],['3,75','4,10']]);
+  const quoted=parseCsvRecords('\nX;Y;Номер\n"1,25";"2,50";"А;1\nэтаж"\n3,75;4,10;"А""2"');
+  assert.equal(guessTableHeader(quoted.rows),true);
+  assert.deepEqual(tableWithHeader(quoted.rows,true).rows,[['1,25','2,50','А;1\nэтаж'],['3,75','4,10','А"2']]);
+  assert.equal(parseCsvRecords('\n\n1.25,2.50\n3.75,4.10').delimiter,',');
+  assert.equal(parseCsvRecords('\n1,25\t2,50\n3,75\t4,10').delimiter,'\t');
+  assert.deepEqual(parseCsvRecords('1,25;2,50', ',').rows,[['1','25;2','50']]);
+  console.log('PASS R11: decimal commas, leading blank records, headers, tabs, quoted values and manual override.');
 
   const cacheProject=createEmptyProject();const cachePid=cacheProject.pipelines[0].id;
   cacheProject.groups=[group('g',1,cachePid),group('other',2,cachePid)];

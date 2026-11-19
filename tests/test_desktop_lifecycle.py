@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import tempfile
 import threading
 import unittest
@@ -130,6 +131,24 @@ class DesktopLifecycleTest(unittest.TestCase):
     def test_can_close_during_startup(self):
         with patch.object(launcher, '_splash_close'), patch('app.cad_operations.begin_shutdown'), patch('app.cad_operations.is_busy', return_value=False):
             self.assertTrue(launcher.DesktopApi()._on_closing())
+
+    def test_R10_window_geometry_error_leaves_desktop_and_cad_available(self):
+        api = launcher.DesktopApi()
+        api._window = Window()
+        api._window.native = SimpleNamespace(Invoke=lambda action: action())
+        api._panels = MagicMock()
+        api._panels.shutdown.side_effect = OSError('geometry write failed')
+        with patch.dict(sys.modules, {'System': SimpleNamespace(Action=lambda action: action)}), \
+                patch('app.cad_operations.shutdown', return_value=True) as prepare, \
+                patch('app.cad_operations.resume_after_shutdown') as resume:
+            api.prepareClose()
+            with self.assertRaisesRegex(OSError, 'geometry write failed'):
+                api.closeConfirmed()
+        prepare.assert_called_once()
+        resume.assert_called_once()
+        self.assertFalse(api._window.closed)
+        self.assertFalse(api._close_prepared)
+        self.assertFalse(api._allow_close)
 
     def test_failed_replace_preserves_existing_project(self):
         with tempfile.TemporaryDirectory() as folder:

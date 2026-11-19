@@ -28,8 +28,8 @@ function load(relative) {
   };
   cache.set(file,mod);
   let source = fs.readFileSync(file,'utf8').replaceAll('import.meta.env', '({ DEV: false })');
-  source = source.replace('export function buildPreviewOrderForGroup(project: PileProject, targetGroup: PileGroup) {',
-    'export function buildPreviewOrderForGroup(project: PileProject, targetGroup: PileGroup) { (globalThis as any).__routeBuilds = ((globalThis as any).__routeBuilds || 0) + 1;');
+  source = source.replace('export function buildPreviewOrderForGroup(project: PileProject, targetGroup: PileGroup): GroupRoute {',
+    'export function buildPreviewOrderForGroup(project: PileProject, targetGroup: PileGroup): GroupRoute { (globalThis as any).__routeBuilds = ((globalThis as any).__routeBuilds || 0) + 1;');
   mod._compile(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX}}).outputText,file);
   return mod.exports;
 }
@@ -173,7 +173,7 @@ const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;
   console.log('PASS PN-018: mixed selection/copy/manual number keep group and pipeline aligned; explicit group wins over stale pipeline.');
 
   const spaces=load('frontend/src/utils/numberingSpace.ts');
-  const checks=declarations('frontend/src/components/Toolbar.tsx',['isPointUnnumbered','pointDisplayName','groupDisplayName','pushIssue','buildModelCheck'],{numberingSpace:spaces.numberingSpace});
+  const checks=declarations('frontend/src/components/Toolbar.tsx',['isPointUnnumbered','pointDisplayName','groupDisplayName','pushIssue','buildModelCheck'],{numberingSpace:spaces.numberingSpace,numberingRouteIssue:numbering.numberingRouteIssue});
   mixed=fixture();mixed.pipelines.push({id:'P2',name:'second',order:2});mixed.groups[1].pipelineId='P2';mixed.points.forEach(p=>{p.number=1;p.manualNumber=true;});
   assert.equal(checks.buildModelCheck(mixed).duplicateNumbersGlobal,0);assert.equal(checks.buildModelCheck(mixed).duplicateManualNumbers,0);
   mixed.groups[1].pipelineId=mixed.pipelines[0].id;assert.equal(checks.buildModelCheck(mixed).duplicateNumbersGlobal,1);
@@ -239,4 +239,27 @@ const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;
   requests[1].finish();await second;assert.equal(maxActive,1);assert.equal(disk.points[0].x,7);
   assert.equal(store.getState().savedProjectSignature,load('frontend/src/utils/projectSaveState.ts').projectSaveSignature(store.getState().project));
   console.log('PASS PN-003: real API transport serializes actual snapshots; dirty stays true until the final file equals the current project.');
+
+  window.setTimeout=callback=>setTimeout(callback,0);
+  let scanInvalidations=0;
+  window.addEventListener('pile-numbering:cad-changed',()=>scanInvalidations++);
+  for(const outcome of [
+    {updated:0,failedWrites:0,scanCachesInvalidated:false},
+    {updated:1,failedWrites:0,scanCachesInvalidated:true},
+    {updated:0,failedWrites:1,scanCachesInvalidated:true}
+  ]) {
+    global.fetch=async(url,init)=>{
+      if(url==='/api/nanocad/operations') {
+        assert.equal(JSON.parse(init.body).kind,'modelstudio/export');
+        return {ok:true,json:async()=>({id:'fixture-export'})};
+      }
+      assert.equal(url,'/api/nanocad/operations/fixture-export');
+      return {ok:true,json:async()=>({status:'completed',result:{updated:outcome.updated,failedWrites:outcome.failedWrites},scanCachesInvalidated:outcome.scanCachesInvalidated})};
+    };
+    const before=scanInvalidations;
+    const result=await client.exportNanoCadModelStudioObjects({numberParameter:'NUMBER',points:[]});
+    assert.equal(result.failedWrites,outcome.failedWrites);
+    assert.equal(scanInvalidations-before,Number(outcome.scanCachesInvalidated));
+  }
+  console.log('PASS R13: CAD completion invalidates both scan kinds after success or failed readback, preserving scans on no-write outcomes.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

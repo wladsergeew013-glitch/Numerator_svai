@@ -21,6 +21,7 @@ function mount(api, flushUserConfig = async () => ({})) {
   const effects = [];
   const errors = [];
   const states = [];
+  const savedProject = { project: { id: 'saved' } };
   const context = {
     exports: {}, window, Event, console: { error: (...args) => errors.push(args) },
     require(name) {
@@ -29,9 +30,11 @@ function mount(api, flushUserConfig = async () => ({})) {
         useState: value => [value, next => states.push(next)],
       };
       if (name === 'react/jsx-runtime') return {};
-      if (name.endsWith('/useProjectStore')) return { useProjectStore: { getState: () => ({ project: 'saved', savedProjectSignature: 'saved' }) } };
-      if (name.endsWith('/projectSaveState')) return { projectSaveSignature: value => value };
-      if (name.endsWith('/projectSession')) return { captureProjectContext: () => ({sessionId:'test'}) };
+      if (name.endsWith('/useProjectStore')) return { useProjectStore: { getState: () => ({ project: savedProject, savedProjectSignature: 'saved' }) } };
+      if (name.endsWith('/projectSaveState')) return { projectSaveSignature: value => value.project.id };
+      if (name.endsWith('/projectSession')) return { captureProjectContext: () => ({sessionId:'test'}), isProjectSession: () => true };
+      if (name.endsWith('/projectSaves')) return { hasPendingProjectSaves: () => false };
+      if (name.endsWith('/projectLimits')) return {};
       if (name.endsWith('/api/client')) return {flushUserConfig};
       throw new Error(`Unexpected import ${name}`);
     },

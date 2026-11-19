@@ -287,7 +287,7 @@ export function GroupManager({ toolbarHeight, statusBarHeight }: Props) {
                         </div>
                         {labelMoved && <div className="field-row">
                           <label>Подпись группы</label>
-                          <button className="btn small" disabled={g.locked} onClick={() => { useProjectStore.getState().pushHistory(); updateGroupMeta(g.id, { groupNumberLabelOffset: null }); }}>Вернуть к центру группы</button>
+                          <button className="btn small" disabled={g.locked} onClick={() => updateGroupMeta(g.id, { groupNumberLabelOffset: null })}>Вернуть к центру группы</button>
                         </div>}
                         <div className="field-row">
                           <label>Порядок нумерации</label>

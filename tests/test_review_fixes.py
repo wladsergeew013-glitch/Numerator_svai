@@ -6,6 +6,7 @@ import json
 import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import tempfile
 import threading
@@ -19,12 +20,12 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from pydantic import ValidationError
 from app import main as api, cad_operations as cad, sdk_bridge as sdk
-from app.http_boundary import LocalApiBoundary, SESSION_TOKEN
+from app.http_boundary import LocalApiBoundary, MAX_BODY, SESSION_TOKEN
 from app.io_project import import_points_from_csv
 from app.numbering_rows import apply_numbering_rows, build_rows_order
 from app.numbering_route import build_route_order, apply_numbering_route
 from app.numbering_vector import apply_numbering_vector
-from app.schemas import PilePoint, PileGroup, NumberingSettings, NumberingRowsRequest, UserConfig
+from app.schemas import PilePoint, PileGroup, NumberingSettings, NumberingRowsRequest, PileProject, UserConfig
 from app.sync_import import sync_points_with_source
 from app.runtime_paths import RuntimePaths
 from test_cad_transfer import Document, entity, point
@@ -36,6 +37,7 @@ class ReviewBackendTests(unittest.TestCase):
         self.root = Path(self.folder)
         for key, value in RuntimePaths(self.root).globals().items(): self.enterContext(patch.object(api, key, value))
         self.enterContext(patch.object(cad, '_stopping', threading.Event()))
+        self.enterContext(patch.object(cad, '_resume_when_idle', False))
         self.enterContext(patch.object(cad.sys, 'platform', 'test'))
         api._MODELSTUDIO_SCAN_CACHE.clear(); api._BLOCK_SCAN_CACHE.clear()
         self.client = TestClient(api.app, client=('127.0.0.1',50000), base_url='http://127.0.0.1:8000', headers={'X-Pile-Token': SESSION_TOKEN})
@@ -412,6 +414,218 @@ print(json.dumps({'path':str(module),'sha':hashlib.sha256(module.read_bytes()).h
         self.assertEqual(result['number'],123)
         self.assertFalse(api._MODELSTUDIO_SCAN_CACHE);self.assertFalse(api._BLOCK_SCAN_CACHE)
         with self.assertRaises(HTTPException): api._modelstudio_cached_scan(scan['scanId'],doc,'all')
+
+    def test_R03_terminal_status_and_result_are_published_after_cleanup(self):
+        for outcome in ('completed', 'failed', 'cancelled'):
+            with self.subTest(outcome=outcome):
+                logging_reached, release_log = threading.Event(), threading.Event()
+                cleanup_reached, release_cleanup = threading.Event(), threading.Event()
+
+                def logger(event, **_):
+                    if event == f'cad_{outcome}':
+                        logging_reached.set()
+                        release_log.wait(5)
+
+                def cleanup_com():
+                    cleanup_reached.set()
+                    release_cleanup.wait(5)
+
+                def operation():
+                    if outcome == 'failed':
+                        raise HTTPException(409, 'Test operation failed')
+                    if outcome == 'cancelled':
+                        raise cad.CadCancelled('Test operation cancelled')
+                    return {'updated': 1}
+
+                fake_com = SimpleNamespace(CoInitialize=lambda: None, CoUninitialize=cleanup_com)
+                with patch.object(cad, 'log_event', logger), patch.object(cad.sys, 'platform', 'win32'), patch.dict(sys.modules, {'pythoncom': fake_com}):
+                    job_id = cad.start('fixture', operation)['id']
+                    route = f'/api/nanocad/operations/{job_id}'
+                    try:
+                        self.assertTrue(logging_reached.wait(5))
+                        self.assertEqual(self.client.get(route).json()['status'], 'running')
+                        release_log.set()
+                        self.assertTrue(cleanup_reached.wait(5))
+                        self.assertEqual(self.client.get(route).json()['status'], 'running')
+                    finally:
+                        release_log.set()
+                        release_cleanup.set()
+                        self.assertTrue(cad._lock.acquire(timeout=5))
+                        cad._lock.release()
+                    status = self.client.get(route).json()
+                    self.assertEqual(status['status'], outcome)
+                    self.assertIn('finishedAt', status)
+                    if outcome == 'completed':
+                        self.assertEqual(status['result'], {'updated': 1})
+                    else:
+                        self.assertIn('Test operation', status['error'])
+
+    def test_R04_export_filters_types_before_handle_validation_and_write(self):
+        for mode in ('auto', 'handles'):
+            for excluded_first in (False, True):
+                for excluded_binding in ('local', 'foreign', 'unknown-type'):
+                    with self.subTest(mode=mode, excluded_first=excluded_first, binding=excluded_binding):
+                        included, excluded = entity('A'), entity('B', 10)
+                        excluded.Element.Name = 'OtherPile'
+                        doc = Document([included, excluded])
+                        first = point('a', 0, 'A')
+                        second = point('b', 10, 'B')
+                        second['meta']['objectName'] = 'OtherPile'
+                        if excluded_binding == 'foreign':
+                            second['meta']['cadDocument'] = 'C:/another-model.dwg'
+                        elif excluded_binding == 'unknown-type':
+                            second['meta'].pop('objectName')
+                        points = [second, first] if excluded_first else [first, second]
+                        request = api.NanoCadModelStudioExportRequest(matchMode=mode, scope='all',
+                            selectedObjectNames=['Pile'], numberParameter='NUMBER', points=points)
+                        with patch.object(api, '_connect_nanocad', return_value=(None, doc, doc.ModelSpace)):
+                            result = api.export_modelstudio_objects(request)
+                        self.assertEqual((result['updated'], result['skippedObjectTypes'], result['failedWrites']), (1, 1, 0))
+                        self.assertEqual(included.Element.Parameters.Item('NUMBER').Value, '7')
+                        self.assertEqual(excluded.Element.Parameters.Item('NUMBER').Value, 'old')
+
+    def test_R08_largest_csv_project_saves_and_autosaves_via_http(self):
+        csv_data = ('X,Y,Number\n' + ''.join(f'{i},{i*2},{i+1}\n' for i in range(100000))).encode()
+        imported = self.client.post('/api/import/csv', files={'file': ('large.csv', csv_data)})
+        self.assertEqual(imported.status_code, 200)
+        points = imported.json()['points']
+        self.assertEqual(len(points), 100000)
+        points[0]['x'] = 42.5
+        project = {'project': {'id': 'large', 'name': 'Large'}, 'points': points}
+        content = json.dumps(project, separators=(',', ':')).encode()
+        self.assertGreater(len(content), MAX_BODY)
+        saved = self.client.post('/api/projects/local/save', content=content, headers={'Content-Type': 'application/json'})
+        self.assertEqual(saved.status_code, 200, saved.text[:200])
+        autosaved = self.client.post('/api/autosave/project', content=b'{"project":' + content + b'}', headers={'Content-Type': 'application/json'})
+        self.assertEqual(autosaved.status_code, 200, autosaved.text[:200])
+        opened = self.client.get(f"/api/projects/local/{saved.json()['fileName']}")
+        self.assertEqual(opened.status_code, 200)
+        restored = opened.json()['points']
+        self.assertEqual((len(restored), restored[0]['x'], restored[-1]['sourceNumber']), (100000, 42.5, '100000'))
+        recovered = PileProject.model_validate_json(Path(autosaved.json()['path']).read_bytes())
+        self.assertEqual((len(recovered.points), recovered.points[0].x), (100000, 42.5))
+        project['points'].append({'x': 1, 'y': 2})
+        self.assertEqual(self.client.post('/api/projects/local/save', json=project).status_code, 422)
+        self.assertEqual(PileProject.model_validate_json((self.root/'projects'/saved.json()['fileName']).read_bytes()).points[0].x, 42.5)
+
+    def test_R09_stale_token_response_is_readable_from_allowed_dev_origin(self):
+        origin = 'http://127.0.0.1:5173'
+        stale = self.client.get('/api/config/user', headers={'Origin': origin, 'X-Pile-Token': 'previous-session'})
+        self.assertEqual(stale.status_code, 401)
+        self.assertEqual(stale.headers['access-control-allow-origin'], origin)
+        self.assertEqual(stale.headers['access-control-allow-credentials'], 'true')
+        renewed = self.client.post('/api/session', headers={'Origin': origin, 'X-Pile-Client': '1'})
+        self.assertEqual(renewed.status_code, 200)
+        self.assertEqual(self.client.get('/api/config/user', headers={'Origin': origin, 'X-Pile-Token': renewed.json()['token']}).status_code, 200)
+        foreign = self.client.get('/api/config/user', headers={'Origin': 'https://example.invalid'})
+        self.assertEqual(foreign.status_code, 403)
+        self.assertNotIn('access-control-allow-origin', foreign.headers)
+
+    def test_R10_admission_resumes_only_after_worker_and_sdk_acknowledgement(self):
+        entered, finish = threading.Event(), threading.Event()
+        sdk_pending = threading.Event()
+        sdk_pending.set()
+
+        def active():
+            entered.set()
+            finish.wait(5)
+            cad.check_cancelled()
+
+        with patch.object(sdk, 'has_pending_requests', sdk_pending.is_set):
+            first = cad.start('active-fixture', active)
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertFalse(cad.shutdown(self.root/'stop.json', timeout=.01))
+                with self.assertRaises(HTTPException) as busy:
+                    cad.start('too-early', lambda: {})
+                self.assertEqual(busy.exception.status_code, 503)
+            finally:
+                finish.set()
+                self.assertTrue(cad._lock.acquire(timeout=5))
+                cad._lock.release()
+            self.assertEqual(cad.status(first['id'])['status'], 'cancelled')
+            with self.assertRaises(HTTPException) as pending:
+                cad.start('sdk-awaiting-ack', lambda: {})
+            self.assertEqual(pending.exception.status_code, 503)
+            sdk_pending.clear()
+            resumed = cad.start('resume-fixture', lambda: {'resumed': True})
+            self.assertTrue(cad._lock.acquire(timeout=5))
+            cad._lock.release()
+            self.assertEqual(cad.status(resumed['id'])['result'], {'resumed': True})
+
+    def test_R10_journal_write_error_releases_cad_admission(self):
+        with patch('app.project_files.atomic_write_project', side_effect=OSError('journal write failed')):
+            with self.assertRaisesRegex(OSError, 'journal write failed'):
+                cad.shutdown(self.root/'stop.json', timeout=.1)
+        resumed = cad.start('fixture', lambda: {'ok': True})
+        self.assertTrue(cad._lock.acquire(timeout=5))
+        cad._lock.release()
+        self.assertEqual(cad.status(resumed['id'])['result'], {'ok': True})
+
+    def test_R11_csv_recognizes_decimal_commas_and_skips_leading_empty_records(self):
+        for data in ('\r\n1,25;2,50\r\n3,75;4,10\r\n', '\nX;Y;Номер\n"1,25";"2,50";"А;1\nэтаж"\n3,75;4,10;А2', '\r\n1.25,2.50\r\n3.75,4.10'):
+            with self.subTest(data=data):
+                points = import_points_from_csv(data.encode()).points
+                self.assertEqual([(p.x, p.y) for p in points], [(1.25, 2.50), (3.75, 4.10)])
+                if 'Номер' in data:
+                    self.assertEqual(points[0].sourceNumber, 'А;1\nэтаж')
+
+    def test_R12_single_group_reuses_previous_virtual_counter_and_reserves_neighbours(self):
+        for step in (1, -1):
+            with self.subTest(step=step):
+                settings = NumberingSettings(startNumber=step, step=step)
+                earlier = PileGroup(id='g1', name='First', order=1, numbering=settings)
+                target = PileGroup(id='g2', name='Target', order=2, numbering=settings)
+                later = PileGroup(id='g3', name='Later', order=3, numbering=settings, locked=True)
+                points = [PilePoint(id='a',x=0,y=0,number=step,groupId='g1'), PilePoint(id='b',x=1,y=0,number=2*step,groupId='g1'),
+                          PilePoint(id='c',x=2,y=0,groupId='g2')]
+                request = {'points': points, 'groups': [earlier,target,later], 'groupId': 'g2'}
+                actual = apply_numbering_rows(NumberingRowsRequest(**request))
+                expected = apply_numbering_rows(NumberingRowsRequest(**{**request, 'groupId': None}))
+                self.assertEqual([p.number for p in actual], [step,2*step,3*step])
+                self.assertEqual(actual[-1].number, expected[-1].number)
+                points[1].manualNumber = True
+                points.append(PilePoint(id='fixed', x=3,y=0,number=3*step,groupId='g3'))
+                reserved = apply_numbering_rows(NumberingRowsRequest(**request))
+                self.assertEqual(reserved[2].number,4*step)
+                self.assertEqual([reserved[0],reserved[1],reserved[3]], [points[0],points[1],points[3]])
+
+    def test_R13_backend_marks_both_scans_invalid_even_after_failed_readback(self):
+        for writable in (True, False):
+            with self.subTest(writable=writable):
+                item = entity('A')
+                item.Element.Parameters.writable = writable
+                doc = Document([item])
+                with patch.object(api, '_connect_nanocad', return_value=(None, doc, doc.ModelSpace)):
+                    scan = api.scan_modelstudio_objects('all')
+                    api._BLOCK_SCAN_CACHE['other-kind'] = {}
+                    created = self.client.post('/api/nanocad/operations', json={'kind': 'modelstudio/export', 'payload': {
+                        'scope': 'all', 'scanId': scan['scanId'], 'numberParameter': 'NUMBER',
+                        'matchMode': 'handles', 'points': [point('p', 0, 'A')]}})
+                    self.assertEqual(created.status_code, 200, created.text)
+                    self.assertTrue(cad._lock.acquire(timeout=5))
+                    cad._lock.release()
+                status = cad.status(created.json()['id'])
+                self.assertEqual(status['status'], 'completed')
+                self.assertTrue(status['scanCachesInvalidated'])
+                self.assertEqual((status['result']['updated'], status['result']['failedWrites']), (int(writable), int(not writable)))
+                self.assertFalse(api._MODELSTUDIO_SCAN_CACHE)
+                self.assertFalse(api._BLOCK_SCAN_CACHE)
+
+    def test_R14_file_component_budget_includes_utf8_and_autosave_suffix(self):
+        for index, name in enumerate(('a'*240, 'С'*130, '\U0001f9f1'*100)):
+            with self.subTest(index=index):
+                project = {'project': {'id': f'long-{index}', 'name': name}}
+                save = self.client.post('/api/projects/local/save', json=project)
+                auto = self.client.post('/api/autosave/project', json={'project': project})
+                for result in (save, auto):
+                    self.assertEqual(result.status_code, 200, result.text[:200])
+                    component = result.json()['fileName']
+                    self.assertTrue(component.endswith('.pilenum.json'))
+                    self.assertLessEqual(len(component.encode('utf-8')), 255)
+                    self.assertNotIn('\ufffd', component)
+                self.assertTrue((self.root/'projects'/save.json()['fileName']).is_file())
+                self.assertTrue(Path(auto.json()['path']).is_file())
 
     def test_PN039_sdk_technical_type_does_not_follow_display_name(self):
         item=sdk.SdkEntity(Mock(),{'kind':'model_studio','objectName':'TechnicalPile','name':'Pile model A','position':[0,0,0],'parameters':{}})
